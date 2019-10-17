@@ -12,6 +12,7 @@ extern crate sprs;
 
 use crate::protocol_traits::graph::GraphExtras;
 use crate::protocol_traits::ledger::{LedgerView, MockLedger};
+use crate::types::dynamic_weight::DynamicWeights;
 use crate::types::mock::{Mock, MockAnnotator, MockNetwork};
 use crate::types::network::Artifact;
 use crate::types::walk::{RandomWalk, RandomWalks, SeedSet};
@@ -19,8 +20,7 @@ use crate::types::Osrank;
 use core::iter::Iterator;
 use fraction::Fraction;
 use num_traits::{One, Zero};
-use oscoin_graph_api::{Direction, Edge, Graph, GraphAlgorithm, GraphAnnotator, GraphObject, Id};
-use rand::distributions::uniform::SampleUniform;
+use oscoin_graph_api::{Direction, Graph, GraphAlgorithm, GraphAnnotator, GraphObject, Id};
 use rand::distributions::WeightedError;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -29,9 +29,8 @@ use rayon::prelude::*;
 
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::ops::AddAssign;
 
-use super::{Normalised, NormalisedGraph, OsrankError};
+use super::OsrankError;
 
 #[derive(Debug)]
 /// The output from a random walk.
@@ -53,13 +52,16 @@ fn walks<'a, L, G: 'a, RNG>(
     rng: &RNG,
 ) -> Result<RandomWalks<Id<G::Node>>, OsrankError>
 where
-    L: LedgerView + Send + Sync,
-    G: GraphExtras + Send + Sync,
+    L: LedgerView<W = G::Weight>,
+    G: GraphExtras + DynamicWeights + Send + Sync,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     RNG: Rng + SeedableRng + Clone + Send + Sync,
-    <G as Graph>::Weight:
-        Default + Clone + PartialOrd + for<'x> AddAssign<&'x G::Weight> + SampleUniform,
+    <G as Graph>::Weight: Into<f64> + Send + Sync,
 {
+    let r_value = *ledger_view.get_random_walks_num();
+    let prj_epsilon = ledger_view.get_damping_factors().project;
+    let hyperparams = ledger_view.get_hyperparams();
+
     let res = starting_nodes
         .into_par_iter()
         .map(move |i| {
@@ -82,18 +84,19 @@ where
 
             let mut thread_rng: RNG = SeedableRng::from_rng(rng.clone())?;
 
-            for _ in 0..(*ledger_view.get_random_walks_num()) {
+            for _ in 0..r_value {
                 let mut walk = RandomWalk::new(i.clone());
                 let mut current_node = i;
                 // TODO distinguish account/project
                 // TODO Should there be a safeguard so this doesn't run forever?
-                while thread_rng.gen::<f64>() < ledger_view.get_damping_factors().project {
+                while thread_rng.gen::<f64>() < prj_epsilon {
                     let neighbors = network.edges_directed(&current_node, Direction::Outgoing);
                     match neighbors.choose_weighted(&mut thread_rng, |item| {
-                        network
+                        let edge = network
                             .get_edge(&item.id)
-                            .and_then(|m| Some(m.weight()))
-                            .unwrap()
+                            .expect("Edge not found in choose_weighted");
+                        let w: f64 = network.dynamic_weight(edge, hyperparams).into();
+                        w
                     }) {
                         Ok(next_edge) => {
                             walk.add_next(next_edge.to.clone());
@@ -137,12 +140,11 @@ pub fn random_walk<L, G, RNG>(
     rng: &RNG,
 ) -> Result<WalkResult<G, <G::Node as GraphObject>::Id>, OsrankError>
 where
-    L: LedgerView + Send + Sync,
-    G: GraphExtras + Clone + Send + Sync,
+    L: LedgerView<W = G::Weight>,
+    G: GraphExtras + Clone + DynamicWeights + Send + Sync,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     RNG: Rng + SeedableRng + Clone + Send + Sync,
-    <G as Graph>::Weight:
-        Default + Clone + PartialOrd + for<'x> AddAssign<&'x G::Weight> + SampleUniform,
+    <G as Graph>::Weight: Into<f64> + Send + Sync,
 {
     match seed_set {
         Some(seeds) => {
@@ -185,16 +187,15 @@ pub fn osrank_naive<G, A>(
     seed_set: Option<&SeedSet<Id<G::Node>>>,
     network: &G,
     annotator: &mut A,
-    ledger_view: &(impl LedgerView + Send + Sync),
+    ledger_view: &(impl LedgerView<W = G::Weight>),
     rng: &(impl Rng + SeedableRng + Clone + Send + Sync),
     to_annotation: &dyn Fn(&G::Node, Osrank) -> A::Annotation,
 ) -> Result<(), OsrankError>
 where
-    G: GraphExtras + Clone + Send + Sync + NormalisedGraph,
+    G: GraphExtras + Clone + DynamicWeights + Send + Sync,
     A: GraphAnnotator,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
-    <G as Graph>::Weight:
-        Default + Clone + PartialOrd + for<'x> AddAssign<&'x G::Weight> + SampleUniform,
+    <G as Graph>::Weight: Into<f64> + Send + Sync,
 {
     match seed_set {
         Some(_) => {
@@ -233,7 +234,7 @@ fn rank_node<L, G>(
     ledger_view: &L,
 ) -> Osrank
 where
-    L: LedgerView,
+    L: LedgerView<W = G::Weight>,
     G: GraphExtras,
     <G::Node as GraphObject>::Id: Eq + Clone + Hash + Sync + Send,
 {
@@ -251,12 +252,12 @@ where
         // convert a percent into a fraction.
         let percent_f64 = (1.0 - ledger_view.get_damping_factors().project) * 100.0;
         let rank = Fraction::new(percent_f64.round() as u64, 100u64)
-            * Osrank::new(node_visits as u32, total_walks as u32);
+            * Fraction::new(node_visits as u32, total_walks as u32);
 
-        if rank > Osrank::one() {
-            Osrank::one()
+        if rank > Fraction::one() {
+            Osrank(Fraction::one())
         } else {
-            rank
+            Osrank(rank)
         }
     }
 }
@@ -270,7 +271,7 @@ pub fn rank_network<'a, L, G: 'a, A>(
     to_annotation: &dyn Fn(&G::Node, Osrank) -> A::Annotation,
 ) -> Result<(), OsrankError>
 where
-    L: LedgerView,
+    L: LedgerView<W = G::Weight>,
     G: GraphExtras,
     A: GraphAnnotator,
     <G::Node as GraphObject>::Id: Eq + Clone + Hash + Sync + Send,
@@ -318,7 +319,7 @@ impl<'a, G, L, A> Default for OsrankNaiveAlgorithm<'a, G, L, A> {
 }
 
 /// The `Context` that the osrank naive _mock_ algorithm will need.
-pub struct OsrankNaiveMockContext<'a, A, G = Normalised<MockNetwork>>
+pub struct OsrankNaiveMockContext<'a, W, A, G = MockNetwork<W>>
 where
     G: Graph,
     A: GraphAnnotator,
@@ -326,17 +327,19 @@ where
     /// The optional `SeetSet` to use.
     pub seed_set: Option<&'a SeedSet<Id<G::Node>>>,
     /// The `LedgerView` for this context, i.e. a `MockLedger`.
-    pub ledger_view: MockLedger,
+    pub ledger_view: MockLedger<W>,
     /// The `to_annotation` function is a "getter" function that given a
     /// generic `Node` "knows" how to extract an annotation out of an `Osrank`.
     /// This function is necessary to bridge the gap between the algorithm being
     /// written in a totally generic way and the need to convert from a
     /// fraction-like `Osrank` into an `A::Annotation`.
-    pub to_annotation: &'a (dyn Fn(&G::Node, Osrank) -> A::Annotation),
+    pub to_annotation: &'a (dyn Fn(&<G as Graph>::Node, Osrank) -> A::Annotation),
 }
 
-impl<'a> Default
-    for OsrankNaiveMockContext<'a, MockAnnotator<Normalised<MockNetwork>>, Normalised<MockNetwork>>
+impl<'a, W> Default for OsrankNaiveMockContext<'a, W, MockAnnotator<MockNetwork<W>>, MockNetwork<W>>
+where
+    W: Clone,
+    MockLedger<W>: Default,
 {
     fn default() -> Self {
         OsrankNaiveMockContext {
@@ -347,7 +350,7 @@ impl<'a> Default
     }
 }
 
-fn mock_network_to_annotation(node: &Artifact<String>, rank: Osrank) -> (String, Osrank) {
+fn mock_network_to_annotation(node: &Artifact<String, Osrank>, rank: Osrank) -> (String, Osrank) {
     let artifact_id = node.id().clone();
     (artifact_id, rank)
 }
@@ -371,16 +374,15 @@ fn mock_network_to_annotation(node: &Artifact<String>, rank: Osrank) -> (String,
 /// define otherwise-conflicting instances.
 impl<'a, G, L, A> GraphAlgorithm<G, A> for Mock<OsrankNaiveAlgorithm<'a, G, L, A>>
 where
-    G: GraphExtras + Clone + Send + Sync + NormalisedGraph,
-    L: LedgerView + Send + Sync,
+    G: GraphExtras + DynamicWeights + Clone + Send + Sync,
+    L: LedgerView,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
-    <G as Graph>::Weight:
-        Default + Clone + PartialOrd + for<'x> AddAssign<&'x G::Weight> + SampleUniform,
-    OsrankNaiveMockContext<'a, A, G>: Default,
+    <G as Graph>::Weight: Into<f64> + Send + Sync,
+    OsrankNaiveMockContext<'a, G::Weight, A, G>: Default,
     A: GraphAnnotator,
 {
     type Output = ();
-    type Context = OsrankNaiveMockContext<'a, A, G>;
+    type Context = OsrankNaiveMockContext<'a, G::Weight, A, G>;
     type Error = OsrankError;
     type RngSeed = [u8; 32];
     type Annotation = <A as GraphAnnotator>::Annotation;
@@ -414,53 +416,52 @@ mod tests {
     extern crate rand_xoshiro;
 
     use super::*;
-    use crate::algorithm::Normalised;
-    use crate::protocol_traits::ledger::MockLedger;
-    use crate::types::mock::{Mock, MockAnnotator, MockNetwork};
-    use crate::types::network::{ArtifactType, DependencyType, Network};
+    use crate::protocol_traits::ledger;
+    use crate::types::mock;
+    use crate::types::mock::Mock;
+    use crate::types::network::Network;
     use crate::types::Weight;
+    use crate::util::{add_edges, add_projects, add_users};
     use fraction::ToPrimitive;
     use num_traits::Zero;
-    use oscoin_graph_api::{GraphAlgorithm, GraphWriter};
+    use oscoin_graph_api::{types, GraphAlgorithm};
     use quickcheck::{quickcheck, TestResult};
+    use std::ops::Deref;
+
+    type MockNetwork = mock::MockNetwork<Weight>;
+    type MockAnnotator<N> = mock::MockAnnotator<N>;
+    type MockLedger = ledger::MockLedger<Weight>;
 
     // Test that our osrank algorithm yield a probability distribution,
     // i.e. the sum of all the ranks equals 1.0 (modulo some rounding error)
-    fn prop_osrank_is_approx_probability_distribution(
-        graph: Normalised<MockNetwork>,
-    ) -> TestResult {
-        if graph.normalised_graph.is_empty() {
+    fn prop_osrank_is_approx_probability_distribution(graph: MockNetwork) -> TestResult {
+        if graph.is_empty() {
             return TestResult::discard();
         }
 
         let initial_seed = [0; 32];
 
-        let algo: Mock<
-            OsrankNaiveAlgorithm<
-                Normalised<MockNetwork>,
-                MockLedger,
-                MockAnnotator<Normalised<MockNetwork>>,
-            >,
-        > = Mock {
-            unmock: OsrankNaiveAlgorithm::default(),
-        };
+        let algo: Mock<OsrankNaiveAlgorithm<MockNetwork, MockLedger, MockAnnotator<MockNetwork>>> =
+            Mock {
+                unmock: OsrankNaiveAlgorithm::default(),
+            };
         let mut ctx = OsrankNaiveMockContext::default();
-        let mut annotator: MockAnnotator<Normalised<MockNetwork>> = Default::default();
+        let mut annotator: MockAnnotator<MockNetwork> = Default::default();
 
         assert_eq!(
             algo.execute(&mut ctx, &graph, &mut annotator, initial_seed),
             Ok(())
         );
 
-        let rank_f64 = annotator
+        let rank = annotator
             .annotator
             .values()
-            .fold(Osrank::zero(), |mut acc, value| {
-                acc += *value;
+            .fold(Fraction::zero(), |mut acc, value| {
+                acc += *(value.deref());
                 acc
-            })
-            .to_f64()
-            .unwrap();
+            });
+
+        let rank_f64 = Osrank(rank).to_f64().unwrap();
 
         // FIXME(adn) This is a fairly weak check, but so far it's the best
         // we can shoot for.
@@ -469,38 +470,27 @@ mod tests {
 
     #[test]
     fn osrank_is_approx_probability_distribution() {
-        quickcheck(
-            prop_osrank_is_approx_probability_distribution
-                as fn(Normalised<MockNetwork>) -> TestResult,
-        );
+        quickcheck(prop_osrank_is_approx_probability_distribution as fn(MockNetwork) -> TestResult);
     }
 
     // Test that given the same initial seed, two osrank algorithms yields
     // exactly the same result.
-    fn prop_osrank_is_deterministic(
-        graph: Normalised<MockNetwork>,
-        entropy: Vec<u8>,
-    ) -> TestResult {
-        if graph.normalised_graph.is_empty() || entropy.len() < 32 {
+    fn prop_osrank_is_deterministic(graph: MockNetwork, entropy: Vec<u8>) -> TestResult {
+        if graph.is_empty() || entropy.len() < 32 {
             return TestResult::discard();
         }
 
         let initial_seed: &[u8; 32] = array_ref!(entropy.as_slice(), 0, 32);
 
-        let algo: Mock<
-            OsrankNaiveAlgorithm<
-                Normalised<MockNetwork>,
-                MockLedger,
-                MockAnnotator<Normalised<MockNetwork>>,
-            >,
-        > = Mock {
-            unmock: OsrankNaiveAlgorithm::default(),
-        };
+        let algo: Mock<OsrankNaiveAlgorithm<MockNetwork, MockLedger, MockAnnotator<MockNetwork>>> =
+            Mock {
+                unmock: OsrankNaiveAlgorithm::default(),
+            };
 
         let mut ctx1 = OsrankNaiveMockContext::default();
         let mut ctx2 = OsrankNaiveMockContext::default();
-        let mut annotator1: MockAnnotator<Normalised<MockNetwork>> = Default::default();
-        let mut annotator2: MockAnnotator<Normalised<MockNetwork>> = Default::default();
+        let mut annotator1: MockAnnotator<MockNetwork> = Default::default();
+        let mut annotator2: MockAnnotator<MockNetwork> = Default::default();
 
         let first_run = algo.execute(&mut ctx1, &graph, &mut annotator1, *initial_seed);
         let second_run = algo.execute(&mut ctx2, &graph, &mut annotator2, *initial_seed);
@@ -526,57 +516,149 @@ mod tests {
 
     #[test]
     fn osrank_is_deterministic() {
-        quickcheck(
-            prop_osrank_is_deterministic as fn(Normalised<MockNetwork>, Vec<u8>) -> TestResult,
-        );
+        quickcheck(prop_osrank_is_deterministic as fn(MockNetwork, Vec<u8>) -> TestResult);
     }
 
     #[test]
     fn everything_ok() {
         // build the example network
-        let mut network = Normalised::new(Network::default());
-        for node in &["p1", "p2", "p3"] {
-            network.add_node(
-                node.to_string(),
-                ArtifactType::Project {
-                    osrank: Zero::zero(),
-                },
-            )
-        }
+        let mut network = Network::default();
+
+        add_projects(
+            &mut network,
+            [("p1", Some(100)), ("p2", Some(30)), ("p3", Some(80))]
+                .iter()
+                .cloned(),
+        );
+        add_users(
+            &mut network,
+            [
+                ("a1", Some(100)),
+                ("a2", Some(90)),
+                ("a3", Some(20)),
+                ("isle", None),
+            ]
+            .iter()
+            .cloned(),
+        );
 
         // Create the seed set from all projects
         let seed_set = SeedSet::from(vec!["p1".to_string(), "p2".to_string(), "p3".to_string()]);
 
-        for node in &["a1", "a2", "a3", "isle"] {
-            network.add_node(
-                node.to_string(),
-                ArtifactType::Account {
-                    osrank: Zero::zero(),
-                },
-            )
-        }
         let edges = [
-            ("p1", "a1", Weight::new(3, 7)),
-            ("a1", "p1", Weight::new(1, 1)),
-            ("p1", "p2", Weight::new(4, 7)),
-            ("p2", "a2", Weight::new(1, 1)),
-            ("a2", "p2", Weight::new(1, 3)),
-            ("a2", "p3", Weight::new(2, 3)),
-            ("p3", "a2", Weight::new(11, 28)),
-            ("p3", "a3", Weight::new(1, 28)),
-            ("p3", "p1", Weight::new(2, 7)),
-            ("p3", "p2", Weight::new(2, 7)),
-            ("a3", "p3", Weight::new(1, 1)),
-        ];
-        for edge in &edges {
-            network.add_edge(
+            (
+                0,
+                "p1",
+                "a1",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::Contrib,
+                    contributions: Some(100),
+                },
+            ),
+            (
+                1,
+                "a1",
+                "p1",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::ContribStar,
+                    contributions: Some(100),
+                },
+            ),
+            (
                 2,
-                &edge.0.to_string(),
-                &edge.1.to_string(),
-                edge.2.as_f64().unwrap(),
-                DependencyType::Influence(edge.2.as_f64().unwrap()),
-            )
-        }
+                "p1",
+                "p2",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::Depend,
+                    contributions: None,
+                },
+            ),
+            (
+                3,
+                "p2",
+                "a2",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::Contrib,
+                    contributions: Some(30),
+                },
+            ),
+            (
+                4,
+                "a2",
+                "p2",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::ContribStar,
+                    contributions: Some(30),
+                },
+            ),
+            (
+                5,
+                "a2",
+                "p3",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::ContribStar,
+                    contributions: Some(60),
+                },
+            ),
+            (
+                6,
+                "p3",
+                "a2",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::Contrib,
+                    contributions: Some(60),
+                },
+            ),
+            (
+                7,
+                "p3",
+                "a3",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::Contrib,
+                    contributions: Some(20),
+                },
+            ),
+            (
+                8,
+                "p3",
+                "p1",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::Depend,
+                    contributions: None,
+                },
+            ),
+            (
+                9,
+                "p3",
+                "p2",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::Depend,
+                    contributions: None,
+                },
+            ),
+            (
+                10,
+                "a3",
+                "p3",
+                types::EdgeData {
+                    weight: Weight::zero(),
+                    edge_type: types::EdgeType::ContribStar,
+                    contributions: Some(20),
+                },
+            ),
+        ];
+
+        add_edges(&mut network, edges.iter().cloned());
 
         assert_eq!(network.edge_count(), 11);
 
@@ -584,20 +666,43 @@ mod tests {
         // by who calls `.execute`, probably the ledger/protocol.
         let initial_seed = [0; 32];
 
-        let algo: Mock<
-            OsrankNaiveAlgorithm<
-                Normalised<MockNetwork>,
-                MockLedger,
-                MockAnnotator<Normalised<MockNetwork>>,
-            >,
-        > = Mock {
-            unmock: OsrankNaiveAlgorithm::default(),
-        };
+        let algo: Mock<OsrankNaiveAlgorithm<MockNetwork, MockLedger, MockAnnotator<MockNetwork>>> =
+            Mock {
+                unmock: OsrankNaiveAlgorithm::default(),
+            };
 
         let mut ctx = OsrankNaiveMockContext::default();
         ctx.seed_set = Some(&seed_set);
 
-        let mut annotator: MockAnnotator<Normalised<MockNetwork>> = Default::default();
+        let mut annotator: MockAnnotator<MockNetwork> = Default::default();
+
+        // Assert that the dynamic weights are computed correctly.
+
+        let dynamic_weights: Vec<Weight> = (0..11)
+            .map(|x| {
+                network.dynamic_weight(
+                    network.get_edge(&x).unwrap(),
+                    ctx.ledger_view.get_hyperparams(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            dynamic_weights,
+            [
+                Weight::new(1, 7),
+                Weight::new(2, 5),
+                Weight::new(4, 7),
+                Weight::new(1, 7),
+                Weight::new(2, 15),
+                Weight::new(4, 15),
+                Weight::new(3, 28),
+                Weight::new(1, 28),
+                Weight::new(2, 7),
+                Weight::new(2, 7),
+                Weight::new(2, 5),
+            ]
+        );
 
         assert_eq!(
             algo.execute(&mut ctx, &network, &mut annotator, initial_seed),

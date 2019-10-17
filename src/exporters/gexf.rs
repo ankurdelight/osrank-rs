@@ -2,9 +2,9 @@
 #![warn(clippy::all)]
 
 use num_traits::Zero;
-use oscoin_graph_api::{Direction, EdgeRef, Graph, GraphObject};
+use oscoin_graph_api::{types, Direction, EdgeRef, Graph, GraphObject};
 
-use super::{size_from_rank, Exporter, NodeType, Rank, RgbColor};
+use super::{size_from_rank, Exporter, Rank, RgbColor};
 use crate::types::mock::KeyValueAnnotator;
 
 use std::convert::TryInto;
@@ -168,11 +168,11 @@ fn write_node<N, V>(
 where
     N: GraphObject,
     N::Id: IntoGexfXml + Clone + TryInto<String> + Eq + Hash,
-    <N as GraphObject>::Data: Clone + Into<NodeType>,
+    <N as GraphObject>::Data: Clone + Into<types::NodeType>,
     V: Into<Rank<f64>> + Zero + Clone,
 {
     let data: <N as GraphObject>::Data = (*node).data().clone();
-    let node_type: NodeType = data.clone().into();
+    let node_type: types::NodeType = data.clone().into();
     let rank: Rank<f64> = annotator
         .annotator
         .get(&node.id())
@@ -218,7 +218,7 @@ fn write_graph<G, V>(
 where
     G: Graph,
     <G::Node as GraphObject>::Id: IntoGexfXml + Clone + TryInto<String> + Eq + Hash,
-    <G::Node as GraphObject>::Data: Clone + Into<NodeType>,
+    <G::Node as GraphObject>::Data: Clone + Into<types::NodeType>,
     <G::Edge as GraphObject>::Id: IntoGexfXml + Clone,
     V: Into<Rank<f64>> + Zero + Clone,
 {
@@ -256,7 +256,7 @@ fn export_graph_impl<G, V>(
 where
     G: Graph,
     <G::Node as GraphObject>::Id: IntoGexfXml + Clone + TryInto<String> + Eq + Hash,
-    <G::Node as GraphObject>::Data: Clone + Into<NodeType>,
+    <G::Node as GraphObject>::Data: Clone + Into<types::NodeType>,
     <G::Edge as GraphObject>::Id: IntoGexfXml + Clone,
     V: Into<Rank<f64>> + Zero + Clone,
 {
@@ -299,7 +299,7 @@ impl<'a, G, V> Exporter for GexfExporter<'a, G, V>
 where
     G: Graph,
     <G::Node as GraphObject>::Id: IntoGexfXml + Clone + TryInto<String> + Eq + Hash,
-    <G::Node as GraphObject>::Data: Clone + Into<NodeType>,
+    <G::Node as GraphObject>::Data: Clone + Into<types::NodeType>,
     <G::Edge as GraphObject>::Id: IntoGexfXml + Clone,
     V: Into<Rank<f64>> + Zero + Clone,
 {

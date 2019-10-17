@@ -6,9 +6,9 @@ pub mod gexf;
 /// Exports a Graph into GraphML.
 pub mod graphml;
 
-use crate::types::network::ArtifactType;
 use crate::types::Osrank;
 use fraction::ToPrimitive;
+use oscoin_graph_api::types;
 use std::marker::PhantomData;
 
 pub trait Exporter {
@@ -41,23 +41,15 @@ pub fn size_from_rank(r: Rank<f64>) -> f64 {
     }
 }
 
-// (adn) Compatibility shim necessary to be able to distinguish between projects
-// and accounts. Hopefully it will go away as soon as we move to upstream
-// `graph_api`.
-pub enum NodeType {
-    Project,
-    Account,
-}
-
-impl std::convert::From<NodeType> for RgbColor {
-    fn from(f: NodeType) -> Self {
+impl std::convert::From<types::NodeType> for RgbColor {
+    fn from(f: types::NodeType) -> Self {
         match f {
-            NodeType::Project { .. } => RgbColor {
+            types::NodeType::Project => RgbColor {
                 red: 0,
                 green: 0,
                 blue: 255,
             },
-            NodeType::Account { .. } => RgbColor {
+            types::NodeType::User => RgbColor {
                 red: 255,
                 green: 0,
                 blue: 0,
@@ -67,20 +59,10 @@ impl std::convert::From<NodeType> for RgbColor {
 }
 
 // Traits necessary to satisfy upstream constraints
-
-impl std::convert::From<ArtifactType> for NodeType {
-    fn from(atype: ArtifactType) -> Self {
-        match atype {
-            ArtifactType::Project { .. } => NodeType::Project,
-            ArtifactType::Account { .. } => NodeType::Account,
-        }
-    }
-}
-
-impl std::convert::From<ArtifactType> for Rank<f64> {
-    fn from(atype: ArtifactType) -> Self {
+impl std::convert::From<types::NodeData<Osrank>> for Rank<f64> {
+    fn from(adata: types::NodeData<Osrank>) -> Self {
         Rank {
-            rank: atype.get_osrank().to_f64().unwrap_or(0.0),
+            rank: adata.rank.rank.to_f64().unwrap_or(0.0),
             from_type: PhantomData,
         }
     }

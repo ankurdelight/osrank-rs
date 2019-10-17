@@ -5,17 +5,19 @@ extern crate oscoin_graph_api;
 
 use crate::exporters::csv::{export_rank_to_csv, CsvExporterError};
 use crate::exporters::Exporter;
-use crate::types::network::{Artifact, DependencyType, Network};
+use crate::types::network::{Artifact, Network};
 use crate::types::Osrank;
 use crate::util::quickcheck::frequency;
 use fraction::ToPrimitive;
-use oscoin_graph_api::{Graph, GraphAnnotator, GraphObject, GraphWriter};
+use oscoin_graph_api::{types, Graph, GraphAnnotator, GraphObject, GraphWriter};
 use quickcheck::{Arbitrary, Gen};
 use rand::Rng;
 use std::collections::HashMap;
 use std::hash::Hash;
 
-pub type MockNetwork = Network<f64>;
+/// A mock network is a network which uses `W` as edge weights and proper
+/// fractions for the Osrank.
+pub type MockNetwork<W> = Network<W, Osrank>;
 
 /// Equivalent to `newtype Mock a = Mock a` in Haskell.
 ///
@@ -25,19 +27,18 @@ pub struct Mock<A> {
 }
 
 #[derive(Debug)]
-struct ArbitraryEdge<'a> {
+struct ArbitraryEdge<'a, W> {
     source: &'a String,
     target: &'a String,
     id: usize,
-    weight: f64,
-    data: DependencyType<f64>,
+    data: types::EdgeData<W>,
 }
 
-impl Arbitrary for MockNetwork {
+impl<W: Arbitrary + From<f64>> Arbitrary for MockNetwork<W> {
     // Tries to generate an arbitrary Network.
     fn arbitrary<G: Gen>(g: &mut G) -> Self {
         let mut graph = Network::default();
-        let nodes: Vec<Artifact<String>> = Arbitrary::arbitrary(g);
+        let nodes: Vec<Artifact<String, Osrank>> = Arbitrary::arbitrary(g);
 
         let edges = arbitrary_normalised_edges_from(g, &nodes);
 
@@ -46,7 +47,7 @@ impl Arbitrary for MockNetwork {
         }
 
         for e in edges {
-            graph.add_edge(e.id, e.source, e.target, e.weight, e.data)
+            graph.add_edge(e.id, e.source, e.target, e.data)
         }
 
         graph
@@ -70,10 +71,13 @@ impl Arbitrary for NewEdgeAction {
 /// Attempts to generate a vector of random edges that respect the osrank
 /// invariant, i.e. that the sum of the weight of the outgoing ones from a
 /// certain node is 1.
-fn arbitrary_normalised_edges_from<'a, G: Gen + Rng>(
+fn arbitrary_normalised_edges_from<'a, G: Gen + Rng, W>(
     g: &mut G,
-    nodes: &'a [Artifact<String>],
-) -> Vec<ArbitraryEdge<'a>> {
+    nodes: &'a [Artifact<String, Osrank>],
+) -> Vec<ArbitraryEdge<'a, W>>
+where
+    W: From<f64>,
+{
     let mut edges = Vec::new();
     let mut id_counter = 0;
 
@@ -97,8 +101,11 @@ fn arbitrary_normalised_edges_from<'a, G: Gen + Rng>(
                         id: id_counter,
                         source: &node.id(),
                         target: &nodes[ix].id(),
-                        weight: w,
-                        data: DependencyType::Influence(w),
+                        data: types::EdgeData {
+                            edge_type: types::EdgeType::Depend,
+                            weight: W::from(w),
+                            contributions: None,
+                        },
                     });
 
                     id_counter += 1;
@@ -129,7 +136,7 @@ where
 /// A `MockAnnotator` monomorphic over a graph `G`.
 pub type MockAnnotator<G> = KeyValueAnnotator<<<G as Graph>::Node as GraphObject>::Id, Osrank>;
 
-impl Default for MockAnnotator<MockNetwork> {
+impl Default for MockAnnotator<MockNetwork<f64>> {
     fn default() -> Self {
         KeyValueAnnotator {
             annotator: Default::default(),
@@ -137,13 +144,13 @@ impl Default for MockAnnotator<MockNetwork> {
     }
 }
 
-pub struct MockAnnotatorCsvExporter<'a> {
-    pub annotator: MockAnnotator<MockNetwork>,
+pub struct MockAnnotatorCsvExporter<'a, W> {
+    pub annotator: MockAnnotator<MockNetwork<W>>,
     pub out_path: &'a str,
 }
 
-impl<'a> MockAnnotatorCsvExporter<'a> {
-    pub fn new(annotator: MockAnnotator<MockNetwork>, out_path: &'a str) -> Self {
+impl<'a, W> MockAnnotatorCsvExporter<'a, W> {
+    pub fn new(annotator: MockAnnotator<MockNetwork<W>>, out_path: &'a str) -> Self {
         MockAnnotatorCsvExporter {
             annotator,
             out_path,
@@ -151,7 +158,7 @@ impl<'a> MockAnnotatorCsvExporter<'a> {
     }
 }
 
-impl<'a> Exporter for MockAnnotatorCsvExporter<'a> {
+impl<'a, W> Exporter for MockAnnotatorCsvExporter<'a, W> {
     type ExporterOutput = ();
     type ExporterError = CsvExporterError;
     fn export(self) -> Result<Self::ExporterOutput, Self::ExporterError> {

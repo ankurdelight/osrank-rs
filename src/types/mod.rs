@@ -4,32 +4,76 @@
 extern crate fraction;
 extern crate num_traits;
 extern crate petgraph;
+extern crate quickcheck;
 
 use fraction::{Fraction, GenericFraction};
 use num_traits::{Num, One, Signed, Zero};
+use quickcheck::{Arbitrary, Gen};
 use std::fmt;
-use std::ops::{Div, Mul, Rem};
+use std::ops::{Deref, Div, Mul, Rem};
 
+/// Trait to calculate the edge's weight on the fly.
+pub mod dynamic_weight;
 pub mod mock;
 pub mod network;
 pub mod walk;
 
 /// The `Osrank` score, modeled as a fraction. It has a default value of `Zero`,
 /// in case no `Osrank` is provided/calculated yet.
-pub type Osrank = Fraction;
+#[derive(Copy, Clone, Debug, Display, Add, PartialEq, PartialOrd)]
+pub struct Osrank(pub Fraction);
+
+impl Deref for Osrank {
+    type Target = Fraction;
+
+    #[must_use]
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Osrank(f) => f,
+        }
+    }
+}
+
+impl Zero for Osrank {
+    fn zero() -> Self {
+        Osrank(Zero::zero())
+    }
+
+    fn is_zero(&self) -> bool {
+        self.deref().is_zero()
+    }
+}
+
+impl Arbitrary for Osrank {
+    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        let denom = g.next_u32().min(u32::max_value() - 1); // avoids 0.
+        Osrank(Fraction::new(g.next_u32(), denom + 1))
+    }
+}
 
 /// The number of random walks the algorithm has to perform for each node.
 pub type R = u32;
 
-/// The "pruning threshold" for the initial phase of the Osrank computation.
-/// The objective of the initial phase is to prune any node from the graph
-/// falling below this threshold, to avoid sybil attacks and mitigate other
-/// hostile behaviours.
-pub type Tau = f64;
-
 #[derive(Clone, Copy, PartialEq, Add, Sub, Neg, PartialOrd)]
 pub struct Weight {
     get_weight: GenericFraction<u32>,
+}
+
+impl std::convert::From<f64> for Weight {
+    fn from(t: f64) -> Weight {
+        Weight {
+            get_weight: GenericFraction::from(t),
+        }
+    }
+}
+
+impl Arbitrary for Weight {
+    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        let denom = g.next_u32().min(u32::max_value() - 1); // avoids 0.
+        Weight {
+            get_weight: GenericFraction::new(g.next_u32(), denom + 1),
+        }
+    }
 }
 
 impl fmt::Debug for Weight {
@@ -154,45 +198,5 @@ impl Zero for Weight {
 
     fn is_zero(&self) -> bool {
         self.get_weight.numer() == Some(&0)
-    }
-}
-
-/// The hyperparams from the paper, which are used to weight the edges.
-#[derive(Debug)]
-pub struct HyperParams {
-    pub contrib_factor: Weight,
-    pub contrib_prime_factor: Weight,
-    pub depend_factor: Weight,
-    pub maintain_factor: Weight,
-    pub maintain_prime_factor: Weight,
-}
-
-/// A default implementation based on the values from the paper.
-impl Default for HyperParams {
-    fn default() -> Self {
-        HyperParams {
-            contrib_factor: Weight::new(1, 7),
-            contrib_prime_factor: Weight::new(2, 5),
-            depend_factor: Weight::new(4, 7),
-            maintain_factor: Weight::new(2, 7),
-            maintain_prime_factor: Weight::new(3, 5),
-        }
-    }
-}
-
-/// The damping factors for project and accounts
-pub struct DampingFactors {
-    pub project: f64,
-    pub account: f64,
-}
-
-/// The default for the damping factors in other ranks.
-/// The whitepaper did not suggest values for the damping factors.
-impl Default for DampingFactors {
-    fn default() -> Self {
-        DampingFactors {
-            project: 0.85,
-            account: 0.85,
-        }
     }
 }
