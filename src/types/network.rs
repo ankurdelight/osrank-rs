@@ -206,7 +206,7 @@ where
         graph
             .edges_directed(edge.source(), direction)
             .iter()
-            .filter(|e| graph.get_edge(e.id).unwrap().edge_type() == edge_type)
+            .filter(|eref| eref.edge_type == edge_type)
             .count() as u32,
         1u32,
     )
@@ -560,6 +560,7 @@ where
                     from: self.from_graph[eref.source()].id(),
                     to: self.from_graph[eref.target()].id(),
                     id: self.from_graph[eref.id()].id(),
+                    edge_type: &self.from_graph[eref.id()].dependency_data.edge_type,
                 })
             }
         }

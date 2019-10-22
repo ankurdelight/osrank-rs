@@ -20,7 +20,9 @@ use crate::types::Osrank;
 use core::iter::Iterator;
 use fraction::Fraction;
 use num_traits::{One, Zero};
-use oscoin_graph_api::{Direction, Graph, GraphAlgorithm, GraphAnnotator, GraphObject, Id};
+use oscoin_graph_api::{
+    types, Direction, Edge, Graph, GraphAlgorithm, GraphAnnotator, GraphObject, Id, Node,
+};
 use rand::distributions::WeightedError;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -53,13 +55,25 @@ fn walks<'a, L, G: 'a, RNG>(
 ) -> Result<RandomWalks<Id<G::Node>>, OsrankError>
 where
     L: LedgerView<W = G::Weight>,
-    G: GraphExtras + DynamicWeights + Send + Sync,
+    <G as Graph>::Node: Node<types::NodeData<Osrank>>,
+    <G as Graph>::Edge: Edge<
+        <G as Graph>::Weight,
+        <<G as Graph>::Node as GraphObject>::Id,
+        types::EdgeData<<G as Graph>::Weight>,
+    >,
+    G: GraphExtras<
+            NodeData = types::NodeData<Osrank>,
+            EdgeData = types::EdgeData<<G as Graph>::Weight>,
+        > + DynamicWeights
+        + Send
+        + Sync,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     RNG: Rng + SeedableRng + Clone + Send + Sync,
     <G as Graph>::Weight: Into<f64> + Send + Sync,
 {
     let r_value = *ledger_view.get_random_walks_num();
     let prj_epsilon = ledger_view.get_damping_factors().project;
+    let acc_epsilon = ledger_view.get_damping_factors().account;
     let hyperparams = ledger_view.get_hyperparams();
 
     let res = starting_nodes
@@ -86,21 +100,80 @@ where
 
             for _ in 0..r_value {
                 let mut walk = RandomWalk::new(i.clone());
-                let mut current_node = i;
-                // TODO distinguish account/project
+                let mut current_node_id = i;
+
+                let current_node = network
+                    .get_node(current_node_id)
+                    .expect("Couldn't access not during random walk.");
+
+                let damping_factor = match &current_node.node_type() {
+                    types::NodeType::User => acc_epsilon,
+                    types::NodeType::Project => prj_epsilon,
+                };
+
                 // TODO Should there be a safeguard so this doesn't run forever?
-                while thread_rng.gen::<f64>() < prj_epsilon {
-                    let neighbors = network.edges_directed(&current_node, Direction::Outgoing);
-                    match neighbors.choose_weighted(&mut thread_rng, |item| {
+                while thread_rng.gen::<f64>() < damping_factor {
+                    let all_outgoing_edges =
+                        network.edges_directed(&current_node_id, Direction::Outgoing);
+                    match all_outgoing_edges.choose_weighted(&mut thread_rng, |item| {
                         let edge = network
                             .get_edge(&item.id)
                             .expect("Edge not found in choose_weighted");
                         let w: f64 = network.dynamic_weight(edge, hyperparams).into();
                         w
                     }) {
-                        Ok(next_edge) => {
-                            walk.add_next(next_edge.to.clone());
-                            current_node = next_edge.to;
+                        Ok(selected_edge_ref) => {
+                            // At this point we have to compute the probability, based on the
+                            // edge type. We first select all the outgoing edges of the same type,
+                            // and repeat the process.
+
+                            let edges_same_type = network
+                                .edges_directed(current_node_id, Direction::Outgoing)
+                                .into_iter()
+                                .filter(|eref| eref.edge_type == selected_edge_ref.edge_type)
+                                .collect::<Vec<_>>();
+
+                            match edges_same_type.as_slice().choose_weighted(
+                                &mut thread_rng,
+                                |item| match item.edge_type {
+                                    types::EdgeType::Contrib => {
+                                        let selected_edge = network
+                                            .get_edge(selected_edge_ref.id)
+                                            .expect("Couldn't access edge during random walk.");
+                                        let source_node = network
+                                            .get_node(selected_edge.source())
+                                            .expect("walks: source node not found.");
+
+                                        let p_x = selected_edge.data().contributions.unwrap();
+                                        let n = source_node.data().total_contributions.unwrap();
+                                        f64::from(p_x) / f64::from(n)
+                                    }
+                                    types::EdgeType::ContribStar => {
+                                        let selected_edge = network
+                                            .get_edge(selected_edge_ref.id)
+                                            .expect("Couldn't access edge during random walk.");
+                                        let source_node = network
+                                            .get_node(selected_edge.source())
+                                            .expect("walks: source node not found.");
+
+                                        let p_x = selected_edge.data().contributions.unwrap();
+                                        let n_x = source_node.data().total_contributions.unwrap();
+                                        f64::from(p_x) / f64::from(n_x)
+                                    }
+                                    types::EdgeType::Maintain => 1.0 / edges_same_type.len() as f64,
+                                    types::EdgeType::MaintainStar => {
+                                        1.0 / edges_same_type.len() as f64
+                                    }
+                                    types::EdgeType::Depend => 1.0 / edges_same_type.len() as f64,
+                                },
+                            ) {
+                                Ok(next_edge) => {
+                                    walk.add_next(next_edge.to.clone());
+                                    current_node_id = next_edge.to;
+                                }
+                                Err(WeightedError::NoItem) => break,
+                                Err(error) => panic!("Problem with the neighbors: {:?}", error),
+                            }
                         }
                         Err(WeightedError::NoItem) => break,
                         Err(error) => panic!("Problem with the neighbors: {:?}", error),
@@ -141,7 +214,19 @@ pub fn random_walk<L, G, RNG>(
 ) -> Result<WalkResult<G, <G::Node as GraphObject>::Id>, OsrankError>
 where
     L: LedgerView<W = G::Weight>,
-    G: GraphExtras + Clone + DynamicWeights + Send + Sync,
+    <G as Graph>::Node: Node<types::NodeData<Osrank>>,
+    <G as Graph>::Edge: Edge<
+        <G as Graph>::Weight,
+        <<G as Graph>::Node as GraphObject>::Id,
+        types::EdgeData<<G as Graph>::Weight>,
+    >,
+    G: GraphExtras<
+            NodeData = types::NodeData<Osrank>,
+            EdgeData = types::EdgeData<<G as Graph>::Weight>,
+        > + Clone
+        + DynamicWeights
+        + Send
+        + Sync,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     RNG: Rng + SeedableRng + Clone + Send + Sync,
     <G as Graph>::Weight: Into<f64> + Send + Sync,
@@ -192,7 +277,19 @@ pub fn osrank_naive<G, A>(
     to_annotation: &dyn Fn(&G::Node, Osrank) -> A::Annotation,
 ) -> Result<(), OsrankError>
 where
-    G: GraphExtras + Clone + DynamicWeights + Send + Sync,
+    <G as Graph>::Node: Node<types::NodeData<Osrank>>,
+    <G as Graph>::Edge: Edge<
+        <G as Graph>::Weight,
+        <<G as Graph>::Node as GraphObject>::Id,
+        types::EdgeData<<G as Graph>::Weight>,
+    >,
+    G: GraphExtras<
+            NodeData = types::NodeData<Osrank>,
+            EdgeData = types::EdgeData<<G as Graph>::Weight>,
+        > + Clone
+        + DynamicWeights
+        + Send
+        + Sync,
     A: GraphAnnotator,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     <G as Graph>::Weight: Into<f64> + Send + Sync,
@@ -374,7 +471,19 @@ fn mock_network_to_annotation(node: &Artifact<String, Osrank>, rank: Osrank) -> 
 /// define otherwise-conflicting instances.
 impl<'a, G, L, A> GraphAlgorithm<G, A> for Mock<OsrankNaiveAlgorithm<'a, G, L, A>>
 where
-    G: GraphExtras + DynamicWeights + Clone + Send + Sync,
+    <G as Graph>::Node: Node<types::NodeData<Osrank>>,
+    <G as Graph>::Edge: Edge<
+        <G as Graph>::Weight,
+        <<G as Graph>::Node as GraphObject>::Id,
+        types::EdgeData<<G as Graph>::Weight>,
+    >,
+    G: GraphExtras<
+            NodeData = types::NodeData<Osrank>,
+            EdgeData = types::EdgeData<<G as Graph>::Weight>,
+        > + DynamicWeights
+        + Clone
+        + Send
+        + Sync,
     L: LedgerView,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     <G as Graph>::Weight: Into<f64> + Send + Sync,
