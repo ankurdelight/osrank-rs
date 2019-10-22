@@ -29,6 +29,7 @@ use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 
+use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
@@ -69,7 +70,7 @@ where
         + Sync,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     RNG: Rng + SeedableRng + Clone + Send + Sync,
-    <G as Graph>::Weight: Into<f64> + Send + Sync,
+    <G as Graph>::Weight: Copy + Into<f64> + Send + Sync,
 {
     let r_value = *ledger_view.get_random_walks_num();
     let prj_epsilon = ledger_view.get_damping_factors().project;
@@ -113,24 +114,33 @@ where
 
                 // TODO Should there be a safeguard so this doesn't run forever?
                 while thread_rng.gen::<f64>() < damping_factor {
-                    let all_outgoing_edges =
-                        network.edges_directed(&current_node_id, Direction::Outgoing);
-                    match all_outgoing_edges.choose_weighted(&mut thread_rng, |item| {
-                        let edge = network
-                            .get_edge(&item.id)
-                            .expect("Edge not found in choose_weighted");
-                        let w: f64 = network.dynamic_weight(edge, hyperparams).into();
-                        w
-                    }) {
-                        Ok(selected_edge_ref) => {
-                            // At this point we have to compute the probability, based on the
+                    // "blue phase", we select the edge type using the
+                    // hyperparams as probability.
+
+                    let mut possible_edge_types = BTreeSet::new();
+
+                    for eref in network.edges_directed(&current_node_id, Direction::Outgoing) {
+                        possible_edge_types.insert(eref.edge_type);
+                    }
+
+                    match possible_edge_types
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .as_slice()
+                        .choose_weighted(&mut thread_rng, |edge_type| {
+                            let hyper_value = hyperparams.get_param(edge_type);
+                            let w: f64 = (*hyper_value).into();
+                            w
+                        }) {
+                        Ok(selected_edge_type) => {
+                            // "Red phase". At this point we have to compute the probability, based on the
                             // edge type. We first select all the outgoing edges of the same type,
                             // and repeat the process.
 
                             let edges_same_type = network
                                 .edges_directed(current_node_id, Direction::Outgoing)
                                 .into_iter()
-                                .filter(|eref| eref.edge_type == selected_edge_ref.edge_type)
+                                .filter(|eref| eref.edge_type == *selected_edge_type)
                                 .collect::<Vec<_>>();
 
                             match edges_same_type.as_slice().choose_weighted(
@@ -138,7 +148,7 @@ where
                                 |item| match item.edge_type {
                                     types::EdgeType::Contrib => {
                                         let selected_edge = network
-                                            .get_edge(selected_edge_ref.id)
+                                            .get_edge(item.id)
                                             .expect("Couldn't access edge during random walk.");
                                         let source_node = network
                                             .get_node(selected_edge.source())
@@ -150,7 +160,7 @@ where
                                     }
                                     types::EdgeType::ContribStar => {
                                         let selected_edge = network
-                                            .get_edge(selected_edge_ref.id)
+                                            .get_edge(item.id)
                                             .expect("Couldn't access edge during random walk.");
                                         let source_node = network
                                             .get_node(selected_edge.source())
@@ -229,7 +239,7 @@ where
         + Sync,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
     RNG: Rng + SeedableRng + Clone + Send + Sync,
-    <G as Graph>::Weight: Into<f64> + Send + Sync,
+    <G as Graph>::Weight: Copy + Into<f64> + Send + Sync,
 {
     match seed_set {
         Some(seeds) => {
@@ -292,7 +302,7 @@ where
         + Sync,
     A: GraphAnnotator,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
-    <G as Graph>::Weight: Into<f64> + Send + Sync,
+    <G as Graph>::Weight: Copy + Into<f64> + Send + Sync,
 {
     match seed_set {
         Some(_) => {
@@ -486,7 +496,7 @@ where
         + Sync,
     L: LedgerView,
     Id<G::Node>: Clone + Eq + Hash + Send + Sync,
-    <G as Graph>::Weight: Into<f64> + Send + Sync,
+    <G as Graph>::Weight: Copy + Into<f64> + Send + Sync,
     OsrankNaiveMockContext<'a, G::Weight, A, G>: Default,
     A: GraphAnnotator,
 {
