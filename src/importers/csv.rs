@@ -457,6 +457,32 @@ where
                 rank: Zero::zero(),
             },
         );
+
+        // At this point, we still need to correctly set the `total_contributions`
+        // for all the projects this user contributed to.
+
+        match ctx.user2contributions.get(&row.contributor.to_string()) {
+            None => {}
+            Some(contributed_projects) => {
+                for (project_id, contribs) in contributed_projects.iter() {
+                    let mut node_data = ctx
+                        .graph
+                        .node_data_mut(project_id)
+                        .expect("no project found when setting total_contributions.");
+
+                    match node_data.total_contributions {
+                        None => node_data.total_contributions = Some(*contribs),
+                        Some(c1) => node_data.total_contributions = Some(*contribs + c1),
+                    }
+
+                    debug!(
+                        "Project -> {:#?}, Contribs -> {:#?}",
+                        project_id,
+                        ctx.graph.node_data(project_id)
+                    );
+                }
+            }
+        }
     }
 
     debug!("Added all the contributions as nodes to the graph..");
@@ -641,7 +667,7 @@ mod tests {
             network.node_data(&String::from("foo")),
             Some(&types::NodeData {
                 node_type: types::NodeType::Project,
-                total_contributions: None,
+                total_contributions: Some(100),
                 rank: Zero::zero()
             }),
         );
@@ -652,6 +678,15 @@ mod tests {
                 edge_type: types::EdgeType::Depend,
                 weight: 0.8,
                 contributions: None
+            }),
+        );
+
+        assert_eq!(
+            network.edge_data(&7),
+            Some(&types::EdgeData {
+                edge_type: types::EdgeType::ContribStar,
+                weight: 1.0,
+                contributions: Some(100)
             }),
         )
     }
