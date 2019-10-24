@@ -7,7 +7,7 @@ use crate::exporters::csv::{export_rank_to_csv, CsvExporterError};
 use crate::exporters::Exporter;
 use crate::types::network::{Artifact, Network};
 use crate::types::Osrank;
-use crate::util::quickcheck::frequency;
+use crate::util::quickcheck::{frequency, Positive};
 use fraction::ToPrimitive;
 use oscoin_graph_api::{types, Graph, GraphAnnotator, GraphObject, GraphWriter};
 use quickcheck::{Arbitrary, Gen};
@@ -40,7 +40,7 @@ impl<W: Arbitrary + From<f64>> Arbitrary for MockNetwork<W> {
         let mut graph = Network::default();
         let nodes: Vec<Artifact<String, Osrank>> = Arbitrary::arbitrary(g);
 
-        let edges = arbitrary_normalised_edges_from(g, &nodes);
+        let edges = arbitrary_edges_from(g, &nodes);
 
         for n in &nodes {
             graph.add_node(n.id().clone(), n.data().clone())
@@ -68,10 +68,50 @@ impl Arbitrary for NewEdgeAction {
     }
 }
 
+fn arbitrary_edge<'a, G: Gen + Rng, W>(
+    g: &mut G,
+    id: usize,
+    source: &'a String,
+    target: &'a String,
+    w: f64,
+) -> ArbitraryEdge<'a, W>
+where
+    W: From<f64>,
+{
+    let type_choices = vec![
+        (20, types::EdgeType::Contrib),
+        (20, types::EdgeType::ContribStar),
+        (20, types::EdgeType::Maintain),
+        (20, types::EdgeType::MaintainStar),
+        (20, types::EdgeType::Depend),
+    ];
+    let edge_type = frequency(g, type_choices);
+    let contributions = arbitrary_contributions(g, &edge_type);
+
+    ArbitraryEdge {
+        id,
+        source,
+        target,
+        data: types::EdgeData {
+            edge_type,
+            weight: W::from(w),
+            contributions,
+        },
+    }
+}
+
+fn arbitrary_contributions<G: Gen + Rng>(g: &mut G, edge_type: &types::EdgeType) -> Option<u32> {
+    let contribs: Positive<u32> = Arbitrary::arbitrary(g);
+    match edge_type {
+        types::EdgeType::Depend => None,
+        _ => Some(contribs.get_positive),
+    }
+}
+
 /// Attempts to generate a vector of random edges that respect the osrank
 /// invariant, i.e. that the sum of the weight of the outgoing ones from a
 /// certain node is 1.
-fn arbitrary_normalised_edges_from<'a, G: Gen + Rng, W>(
+fn arbitrary_edges_from<'a, G: Gen + Rng, W>(
     g: &mut G,
     nodes: &'a [Artifact<String, Osrank>],
 ) -> Vec<ArbitraryEdge<'a, W>>
@@ -97,16 +137,13 @@ where
                 for ix in node_ixs {
                     let w = 1.0 / f64::from(edges_num);
 
-                    edges.push(ArbitraryEdge {
-                        id: id_counter,
-                        source: &node.id(),
-                        target: &nodes[ix].id(),
-                        data: types::EdgeData {
-                            edge_type: types::EdgeType::Depend,
-                            weight: W::from(w),
-                            contributions: None,
-                        },
-                    });
+                    edges.push(arbitrary_edge(
+                        g,
+                        id_counter,
+                        &node.id(),
+                        &nodes[ix].id(),
+                        w,
+                    ));
 
                     id_counter += 1;
                 }

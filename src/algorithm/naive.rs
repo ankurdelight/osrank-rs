@@ -29,8 +29,9 @@ use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use super::OsrankError;
@@ -81,36 +82,28 @@ where
         .into_par_iter()
         .map(move |i| {
             let mut thread_walks = RandomWalks::new();
+            let mut hasher = DefaultHasher::new();
 
             // ATTENTION: The accuracy (or lack thereof) of the final ranks
             // depends on the goodness of the input RNG. In particular, using
             // a poor RNG for testing might result in an osrank which is > 1.0.
-            // An example of this is the `XorShiftRng`. Quoting the documentation
-            // for `from_rng`:
-            //
-            // "The master PRNG should be at least as high quality as the child PRNGs.
-            // When seeding non-cryptographic child PRNGs, we recommend using a
-            // different algorithm for the master PRNG (ideally a CSPRNG) to avoid
-            // correlations between the child PRNGs. If this is not possible (e.g. forking using
-            // small non-crypto PRNGs) ensure that your PRNG has a good mixing function on the
-            // output or consider use of a hash function with from_seed.
-            // Note that seeding XorShiftRng from another XorShiftRng provides an extreme example
-            // of what can go wrong: the new PRNG will be a clone of the parent."
 
-            let mut thread_rng: RNG = SeedableRng::from_rng(rng.clone())?;
+            // NOTE: This is *not* a cryptographic-safe implementation, as what
+            // we really need here is a splittable, cryptographic RNG, so that
+            // we can give each thread a different RNG and be sure that the
+            // generate f64s are all different. What I have implemented below
+            // is a sort of crappy version of `SplitMix`.
+
+            i.hash(&mut hasher);
+            let mut thread_rng: RNG = SeedableRng::from_rng(RNG::seed_from_u64(
+                hasher.finish() ^ (rng.clone().gen::<u64>()),
+            ))?;
 
             for _ in 0..r_value {
                 let mut walk = RandomWalk::new(i.clone());
                 let mut current_node_id = i;
-
-                let current_node = network
-                    .get_node(current_node_id)
-                    .expect("Couldn't access not during random walk.");
-
-                let damping_factor = match &current_node.node_type() {
-                    types::NodeType::User => acc_epsilon,
-                    types::NodeType::Project => prj_epsilon,
-                };
+                let mut damping_factor =
+                    node_damping_factor(network, &current_node_id, prj_epsilon, acc_epsilon);
 
                 // TODO Should there be a safeguard so this doesn't run forever?
                 while thread_rng.gen::<f64>() < damping_factor {
@@ -158,6 +151,14 @@ where
                                 Ok(next_edge) => {
                                     walk.add_next(next_edge.to.clone());
                                     current_node_id = next_edge.to;
+                                    // Update the damping factor for the next iteration of
+                                    // the while loop.
+                                    damping_factor = node_damping_factor(
+                                        network,
+                                        &current_node_id,
+                                        prj_epsilon,
+                                        acc_epsilon,
+                                    );
                                 }
                                 Err(WeightedError::NoItem) => break,
                                 Err(error) => panic!("Problem with the neighbors: {:?}", error),
@@ -186,6 +187,24 @@ where
             "The starting_nodes were empty.".to_string(),
         )),
         Some(w) => w,
+    }
+}
+
+fn node_damping_factor<G>(
+    network: &G,
+    current_node_id: &Id<G::Node>,
+    prj_factor: f64,
+    user_factor: f64,
+) -> f64
+where
+    G: Graph,
+{
+    let current_node = network
+        .get_node(current_node_id)
+        .expect("Couldn't access not during random walk.");
+    match &current_node.node_type() {
+        types::NodeType::User => user_factor,
+        types::NodeType::Project => prj_factor,
     }
 }
 
@@ -252,7 +271,9 @@ where
             let walks = walks(seeds.seedset_iter().par_bridge(), network, ledger_view, rng)?;
             let mut trusted_node_ids: Vec<&Id<G::Node>> = Vec::new();
             for node in network.nodes() {
-                if rank_node::<L, G>(&walks, node.id().clone(), ledger_view) > Osrank::zero() {
+                if rank_node::<L, G>(&walks, &node.id(), &node.node_type(), ledger_view)
+                    > Osrank::zero()
+                {
                     trusted_node_ids.push(&node.id());
                 }
             }
@@ -343,7 +364,8 @@ where
 /// Assigns an `Osrank` to a `Node`.
 fn rank_node<L, G>(
     random_walks: &RandomWalks<Id<G::Node>>,
-    node_id: Id<G::Node>,
+    node_id: &Id<G::Node>,
+    node_type: &types::NodeType,
     ledger_view: &L,
 ) -> Osrank
 where
@@ -358,12 +380,18 @@ where
     if total_walks == 0 {
         Osrank::zero()
     } else {
+        let damping_factors = ledger_view.get_damping_factors();
+        let node_damping_factor = match node_type {
+            types::NodeType::User => damping_factors.account,
+            types::NodeType::Project => damping_factors.project,
+        };
+
         // We don't use Fraction::from(f64), because that generates some
         // big numbers for the numer & denom, which eventually cause overflow.
         // What we do instead, is to exploit the fact we have a probability
         // distribution between 0.0 and 1.0 and we use a simple formula to
         // convert a percent into a fraction.
-        let percent_f64 = (1.0 - ledger_view.get_damping_factors().project) * 100.0;
+        let percent_f64 = (1.0 - node_damping_factor) * 100.0;
         let rank = Fraction::new(percent_f64.round() as u64, 100u64)
             * Fraction::new(node_visits as u32, total_walks as u32);
 
@@ -392,7 +420,7 @@ where
     for node in network_view.nodes() {
         annotator.annotate_graph(to_annotation(
             &node,
-            rank_node::<L, G>(&random_walks, node.id().clone(), ledger_view),
+            rank_node::<L, G>(&random_walks, &node.id(), &node.node_type(), ledger_view),
         ))
     }
     Ok(())
@@ -590,7 +618,20 @@ mod tests {
 
         // FIXME(adn) This is a fairly weak check, but so far it's the best
         // we can shoot for.
-        TestResult::from_bool(rank_f64 > 0.0 && rank_f64 <= 1.0)
+
+        let pred = rank_f64 > 0.0 && rank_f64 <= 1.0;
+
+        assert_eq!(
+            pred,
+            true,
+            "{}",
+            format!(
+                "Test failed! The total rank for this graph was > 1.0, specifically: {}",
+                rank_f64
+            )
+        );
+
+        TestResult::from_bool(pred)
     }
 
     #[test]
@@ -836,6 +877,13 @@ mod tests {
 
         // We need to sort the ranks because the order of the elements returned
         // by the `HashMap::iter` is not predictable.
+
+        let total_rank: f64 = annotator
+            .annotator
+            .iter()
+            .map(|info| info.1.to_f64().unwrap())
+            .sum();
+
         let mut expected = annotator
             .annotator
             .iter()
@@ -848,6 +896,17 @@ mod tests {
                 ranks
             });
         expected.sort();
+
+        //Assert that the total rank is <= 1.0
+        assert_eq!(
+            total_rank <= 1.0,
+            true,
+            "{}",
+            format!(
+                "Test failed! The total rank for this graph was > 1.0, specifically: {}",
+                total_rank
+            )
+        );
 
         assert_eq!(
             expected,

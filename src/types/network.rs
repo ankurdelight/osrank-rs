@@ -22,7 +22,7 @@ use petgraph::Directed;
 
 use crate::types::dynamic_weight::DynamicWeights;
 use crate::types::Weight;
-use crate::util::quickcheck::frequency;
+use crate::util::quickcheck::{frequency, Positive};
 use quickcheck::{Arbitrary, Gen};
 
 #[derive(Debug, Clone)]
@@ -233,12 +233,12 @@ where
         }
     }
 
-    pub fn new_project(id: Id) -> Self {
+    pub fn new_project(id: Id, total_contributions: u32) -> Self {
         Artifact {
             id,
             artifact_data: types::NodeData {
                 node_type: types::NodeType::Project,
-                total_contributions: None,
+                total_contributions: Some(total_contributions),
                 rank: types::NodeRank { rank: W::zero() },
             },
         }
@@ -302,12 +302,14 @@ where
 {
     fn arbitrary<G: Gen>(g: &mut G) -> Self {
         let id: ArtifactId = Arbitrary::arbitrary(g);
+        let acc_contribs: Positive<u32> = Arbitrary::arbitrary(g);
+        let prj_contribs: Positive<u32> = Arbitrary::arbitrary(g);
         let choices = vec![
             (
                 50,
-                Artifact::new_account(id.clone(), Arbitrary::arbitrary(g)),
+                Artifact::new_account(id.clone(), acc_contribs.get_positive),
             ),
-            (50, Artifact::new_project(id)),
+            (50, Artifact::new_project(id, prj_contribs.get_positive)),
         ];
         frequency(g, choices)
     }
@@ -340,7 +342,7 @@ where
     fn add_artifact(&mut self, id: String, artifact_data: types::NodeData<R>) {
         let id_cloned = id.clone();
         let mut a = match artifact_data.node_type {
-            types::NodeType::Project => Artifact::new_project(id),
+            types::NodeType::Project => Artifact::new_project(id, 0),
             types::NodeType::User => Artifact::new_account(id, 0),
         };
 
@@ -690,7 +692,7 @@ mod tests {
         let mut network = Network::default();
 
         for node in &["p1", "p2", "p3"] {
-            let a = Artifact::new_project(node.to_string());
+            let a = Artifact::new_project(node.to_string(), 100);
             network.add_node(a.id().clone(), a.data().clone());
         }
 
