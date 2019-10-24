@@ -10,12 +10,13 @@ extern crate sprs;
 
 use crate::adjacency::new_network_matrix;
 use crate::linalg::{DenseMatrix, SparseMatrix};
+use crate::protocol_traits::graph::GraphExtras;
 use crate::protocol_traits::ledger::LedgerView;
 use crate::types::network::{Artifact, Dependency};
 use crate::types::{Osrank, Weight};
 use core::fmt;
 use num_traits::{Num, One, Zero};
-use oscoin_graph_api::{types, Graph, GraphDataReader, GraphObject, GraphWriter};
+use oscoin_graph_api::{types, GraphDataReader, GraphDataWriter, GraphObject, GraphWriter};
 use serde::Deserialize;
 use sprs::{CsMat, TriMat, TriMatBase};
 use std::collections::{HashMap, HashSet};
@@ -219,22 +220,15 @@ struct ImportCtx<G> {
     user2contributions: Contributions,
 }
 
-fn total_contributions_for(mp: &Contributions, user: &Contributor) -> Option<u32> {
-    match mp.get(user) {
-        None => None,
-        Some(prjs) => Some(prjs.values().sum()),
-    }
-}
-
 impl<G> ImportCtx<G>
 where
     G: GraphDataReader<
-        Node = Artifact<String, Osrank>,
-        Edge = Dependency<usize, String, f64>,
-        Weight = f64,
-        NodeData = types::NodeData<Osrank>,
-        EdgeData = types::EdgeData<f64>,
-    >,
+            Node = Artifact<String, Osrank>,
+            Edge = Dependency<usize, String, f64>,
+            Weight = f64,
+            NodeData = types::NodeData<Osrank>,
+            EdgeData = types::EdgeData<f64>,
+        > + GraphDataWriter,
 {
     fn new() -> ImportCtx<G> {
         ImportCtx {
@@ -271,12 +265,15 @@ where
                 // for now, this is always `ContribStar` for now.
                 types::EdgeType::ContribStar
             }
-            (types::NodeType::Project, types::NodeType::User) => types::EdgeType::Contrib,
+            (types::NodeType::Project, types::NodeType::User) => {
+                // NOTE(adn) Same considerations as per above..
+                types::EdgeType::Contrib
+            }
             (types::NodeType::Project, types::NodeType::Project) => types::EdgeType::Depend,
         }
     }
 
-    fn contributions(
+    fn edge_contributions(
         &self,
         source: &<G::Node as GraphObject>::Id,
         target: &<G::Node as GraphObject>::Id,
@@ -285,6 +282,53 @@ where
             .get(source)
             .and_then(|p| p.get(target))
             .map(|v| *v)
+    }
+
+    fn set_user_total_contribs(&mut self, user: &Contributor) {
+        match self.user2contributions.get(user) {
+            None => (),
+            Some(prjs) => {
+                let total: u32 = prjs.values().sum();
+
+                if total > 0 {
+                    match self.graph.node_data_mut(user).iter_mut().next() {
+                        None => (),
+                        Some(d) => d.total_contributions = Some(total),
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_projects_contributions(&mut self, user: &Contributor) {
+        match self.user2contributions.get(user) {
+            None => {}
+            Some(contributed_projects) => {
+                for (project_id, contribs) in contributed_projects.iter() {
+                    match self.graph.node_data_mut(project_id) {
+                        None => {}
+                        Some(ref mut node_data) => match node_data.total_contributions {
+                            None => node_data.total_contributions = Some(*contribs),
+                            Some(c1) => node_data.total_contributions = Some(*contribs + c1),
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_user_contribs_for_project(
+        &mut self,
+        contributor: &Rc<Contributor>,
+        prj: &ProjectName,
+        contrib_num: u32,
+    ) {
+        let prjs = self
+            .user2contributions
+            .entry(Rc::clone(contributor))
+            .or_insert_with(HashMap::new);
+
+        prjs.insert(prj.clone(), contrib_num);
     }
 }
 
@@ -360,7 +404,7 @@ pub fn import_network<G, L, R>(
 where
     L: LedgerView<W = f64>,
     R: Read,
-    G: Graph<
+    G: GraphExtras<
             Node = Artifact<String, Osrank>,
             Edge = Dependency<usize, String, f64>,
             Weight = f64,
@@ -397,7 +441,10 @@ where
         );
     }
 
-    debug!("Added all the projects as nodes to the graph..");
+    debug!(
+        "Added all {} projects as nodes to the graph..",
+        ctx.graph.node_count()
+    );
 
     // Iterate once over the contributions and build a matrix where
     // rows are the project names and columns the (unique) contributors.
@@ -422,70 +469,35 @@ where
             ctx.index2id
                 .insert(ctx.index2id.len(), Rc::clone(&contributor).to_string());
 
-            // Bump the total contributions, if any.
-            let prjs = ctx
-                .user2contributions
-                .entry(Rc::clone(&contributor))
-                .or_insert_with(HashMap::new);
-
-            let contribs = prjs
-                .entry(row.project_name.clone())
-                .or_insert(row.contributions);
-            *contribs = row.contributions;
+            ctx.graph.add_node(
+                contributor.to_string(),
+                types::NodeData {
+                    node_type: types::NodeType::User,
+                    total_contributions: None, // This will be set later
+                    rank: Zero::zero(),
+                },
+            );
         }
 
-        ctx.contribs_meta.rows.push(row)
+        ctx.set_user_contribs_for_project(&contributor, &row.project_name, row.contributions);
+        ctx.contribs_meta.rows.push(row);
     }
 
-    // Iterate over the newly-build `contribs_meta.rows` and add the nodes to
-    // the graph. We need to do this step here because we needed to build the
-    // global contribution mapping first.
+    // At this point we added to the graph all the contributor nodes, and we
+    // have build a mapping between each user and a map of <project_id, u32>
+    // contributions. At this point we need to iterate over the contribution_id
+    // set and update the *projects* total_contributions correctly.
 
-    for row in &ctx.contribs_meta.rows {
-        let c = match total_contributions_for(&ctx.user2contributions, &row.contributor.to_string())
-        {
-            None => None,
-            Some(0) => None,
-            Some(x) => Some(x),
-        };
-
-        ctx.graph.add_node(
-            row.contributor.to_string(),
-            types::NodeData {
-                node_type: types::NodeType::User,
-                total_contributions: c,
-                rank: Zero::zero(),
-            },
-        );
-
-        // At this point, we still need to correctly set the `total_contributions`
-        // for all the projects this user contributed to.
-
-        match ctx.user2contributions.get(&row.contributor.to_string()) {
-            None => {}
-            Some(contributed_projects) => {
-                for (project_id, contribs) in contributed_projects.iter() {
-                    let mut node_data = ctx
-                        .graph
-                        .node_data_mut(project_id)
-                        .expect("no project found when setting total_contributions.");
-
-                    match node_data.total_contributions {
-                        None => node_data.total_contributions = Some(*contribs),
-                        Some(c1) => node_data.total_contributions = Some(*contribs + c1),
-                    }
-
-                    debug!(
-                        "Project -> {:#?}, Contribs -> {:#?}",
-                        project_id,
-                        ctx.graph.node_data(project_id)
-                    );
-                }
-            }
-        }
+    let contributors = ctx.contribs_meta.contributors.clone();
+    for contributor in &contributors {
+        ctx.set_user_total_contribs(&contributor);
+        ctx.update_projects_contributions(&contributor);
     }
 
-    debug!("Added all the contributions as nodes to the graph..");
+    debug!(
+        "Added all the {} contributions as nodes to the graph..",
+        contributors.len()
+    );
 
     let dep_adj_matrix = new_dependency_adjacency_matrix(&ctx.deps_meta, deps_csv)?;
 
@@ -508,6 +520,8 @@ where
 
     debug!("Generated the full graph adjacency matrix...");
 
+    let mut invalid_connections = 0;
+
     for (current_edge_id, (&weight, (source, target))) in network_matrix.iter().enumerate() {
         // Here we still exploit the adjacency information, but we use it
         // to construct parallel edges.
@@ -515,20 +529,53 @@ where
         let source_id = &ctx.index2id.get(&source).unwrap();
         let target_id = &ctx.index2id.get(&target).unwrap();
 
-        ctx.graph.add_edge(
-            current_edge_id,
-            source_id,
-            target_id,
-            types::EdgeData {
-                edge_type: ctx.edge_type(source_id, target_id),
-                // It doesn't matter which value we assign here, because we are
-                // not going to look at it during the algorithms (i.e. we will
-                // use the dynamic weight calculation).
-                weight,
-                contributions: ctx.contributions(source_id, target_id),
-            },
-        );
+        let edge_type = ctx.edge_type(source_id, target_id);
+
+        // We need to perform this swap because we keep a global mapping between
+        // `account -> contributed_projects`, so for `ContribStar` and
+        // `MaintainStar` the arrow goes from `A -> P`, for which we will find
+        // an entry in the path. For the `Contrib` and `Maintain` though, the
+        // arrow is from `P -> A`, so if we would try to search in the hashmap
+        // by `project_id` we wouldn't find anything, this is why we flip the
+        // keys here.
+        let (from, to) = match &edge_type {
+            types::EdgeType::ContribStar => (source_id, target_id),
+            types::EdgeType::MaintainStar => (source_id, target_id),
+            _ => (target_id, source_id),
+        };
+
+        let contributions = ctx.edge_contributions(from, to);
+
+        let valid_connection = match edge_type {
+            types::EdgeType::Depend => true,
+            _ => contributions.is_some(),
+        };
+
+        if valid_connection {
+            ctx.graph.add_edge(
+                current_edge_id,
+                source_id,
+                target_id,
+                types::EdgeData {
+                    edge_type,
+                    // It doesn't matter which value we assign here, because we are
+                    // not going to look at it during the algorithms (i.e. we will
+                    // use the dynamic weight calculation).
+                    weight,
+                    contributions,
+                },
+            );
+        } else {
+            invalid_connections += 1;
+        }
     }
+
+    debug!(
+        "Generated a graph with {} nodes and {} edges, while filtering out {} invalid connections.",
+        ctx.graph.node_count(),
+        ctx.graph.edge_count(),
+        invalid_connections
+    );
 
     // Build a graph out of the matrix.
     Ok(ctx.graph)

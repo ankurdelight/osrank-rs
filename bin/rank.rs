@@ -19,21 +19,27 @@ extern crate sprs;
 use clap::{App, Arg};
 use core::fmt::Debug;
 use fraction::Ratio;
-use oscoin_graph_api::{Graph, GraphAlgorithm, GraphObject};
+use oscoin_graph_api::{types, Graph, GraphAlgorithm, GraphObject};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::str::FromStr;
 
 use osrank::algorithm::naive::{OsrankNaiveAlgorithm, OsrankNaiveMockContext};
-use osrank::algorithm::{Normalised, OsrankError};
+use osrank::algorithm::OsrankError;
 use osrank::exporters::csv::CsvExporterError;
 use osrank::exporters::Exporter;
 use osrank::importers::csv::{import_network, CsvImportError};
-use osrank::protocol_traits::ledger::{LedgerView, MockLedger};
-use osrank::types;
-use osrank::types::mock::{Mock, MockAnnotator, MockAnnotatorCsvExporter, MockNetwork};
+use osrank::protocol_traits::ledger;
+use osrank::protocol_traits::ledger::LedgerView;
+use osrank::types::mock;
+use osrank::types::mock::{Mock, MockAnnotator};
 use osrank::types::walk::SeedSet;
+use osrank::types::Weight;
+
+type MockNetwork = mock::MockNetwork<f64>;
+type MockLedger = ledger::MockLedger<f64>;
+type MockAnnotatorCsvExporter<'a> = mock::MockAnnotatorCsvExporter<'a, f64>;
 
 #[derive(Debug, Fail)]
 enum AppError {
@@ -110,15 +116,10 @@ fn run_osrank(
     let (algo, mut ctx, network) = match osrank_algo {
         OsrankAlgorithm::Naive => {
             debug!("Selecting the naive algorithm...");
-            let a: Mock<
-                OsrankNaiveAlgorithm<
-                    Normalised<MockNetwork>,
-                    MockLedger,
-                    MockAnnotator<Normalised<MockNetwork>>,
-                >,
-            > = Mock {
-                unmock: OsrankNaiveAlgorithm::default(),
-            };
+            let a: Mock<OsrankNaiveAlgorithm<MockNetwork, MockLedger, MockAnnotator<MockNetwork>>> =
+                Mock {
+                    unmock: OsrankNaiveAlgorithm::default(),
+                };
             let mut ctx = OsrankNaiveMockContext::default();
             ctx.seed_set = ss;
             ctx.ledger_view = ledger;
@@ -134,15 +135,10 @@ fn run_osrank(
         }
         OsrankAlgorithm::Incremental => {
             debug!("Selecting the incremental (not-implemented) algorithm...");
-            let a: Mock<
-                OsrankNaiveAlgorithm<
-                    Normalised<MockNetwork>,
-                    MockLedger,
-                    MockAnnotator<Normalised<MockNetwork>>,
-                >,
-            > = Mock {
-                unmock: OsrankNaiveAlgorithm::default(),
-            };
+            let a: Mock<OsrankNaiveAlgorithm<MockNetwork, MockLedger, MockAnnotator<MockNetwork>>> =
+                Mock {
+                    unmock: OsrankNaiveAlgorithm::default(),
+                };
             let mut ctx = OsrankNaiveMockContext::default();
             ctx.seed_set = ss;
             ctx.ledger_view = ledger;
@@ -167,7 +163,7 @@ fn run_osrank(
     );
 
     let initial_seed = [0; 32];
-    let mut annotator: MockAnnotator<Normalised<MockNetwork>> = Default::default();
+    let mut annotator: MockAnnotator<MockNetwork> = Default::default();
 
     algo.execute(&mut ctx, &network, &mut annotator, initial_seed)?;
 
@@ -217,35 +213,48 @@ fn parse_hyperparams(
     depend_txt: Option<&str>,
     maintain_txt: Option<&str>,
     maintain_prime_txt: Option<&str>,
-) -> Result<types::HyperParams, AppError> {
-    let mut hyperparams = types::HyperParams::default();
+) -> Result<types::HyperParameters<f64>, AppError> {
+    let ledger = MockLedger::default();
+    let mut hyperparams = ledger.get_hyperparams().clone();
 
     if let Some(contrib) = contrib_txt.and_then(to_weight) {
-        hyperparams.contrib_factor = contrib;
+        hyperparams
+            .edge_weights
+            .insert(types::EdgeType::Contrib, contrib.as_f64().unwrap());
     }
 
     if let Some(contrib_prime) = contrib_prime_txt.and_then(to_weight) {
-        hyperparams.contrib_prime_factor = contrib_prime;
+        hyperparams.edge_weights.insert(
+            types::EdgeType::ContribStar,
+            contrib_prime.as_f64().unwrap(),
+        );
     }
 
     if let Some(depend) = depend_txt.and_then(to_weight) {
-        hyperparams.depend_factor = depend;
+        hyperparams
+            .edge_weights
+            .insert(types::EdgeType::Depend, depend.as_f64().unwrap());
     }
 
     if let Some(maintain) = maintain_txt.and_then(to_weight) {
-        hyperparams.maintain_factor = maintain;
+        hyperparams
+            .edge_weights
+            .insert(types::EdgeType::Maintain, maintain.as_f64().unwrap());
     }
 
     if let Some(maintain_prime) = maintain_prime_txt.and_then(to_weight) {
-        hyperparams.maintain_prime_factor = maintain_prime;
+        hyperparams.edge_weights.insert(
+            types::EdgeType::MaintainStar,
+            maintain_prime.as_f64().unwrap(),
+        );
     }
 
     Ok(hyperparams)
 }
 
-fn to_weight(s: &str) -> Option<types::Weight> {
+fn to_weight(s: &str) -> Option<Weight> {
     Ratio::from_str(s)
-        .map(|r| types::Weight::new(*r.numer(), *r.denom()))
+        .map(|r| Weight::new(*r.numer(), *r.denom()))
         .ok()
 }
 
@@ -374,12 +383,12 @@ fn main() -> Result<(), AppError> {
 
     let tau = matches
         .value_of("tau")
-        .and_then(|s: &str| s.parse::<types::Tau>().ok())
+        .and_then(|s: &str| s.parse::<f64>().ok())
         .unwrap_or(0.0);
 
     let r = matches
         .value_of("iter")
-        .and_then(|s: &str| s.parse::<types::R>().ok())
+        .and_then(|s: &str| s.parse::<u32>().ok())
         .unwrap_or(10);
 
     let acc_damping_factor = matches

@@ -21,7 +21,7 @@ use core::iter::Iterator;
 use fraction::Fraction;
 use num_traits::{One, Zero};
 use oscoin_graph_api::{
-    types, Direction, Edge, Graph, GraphAlgorithm, GraphAnnotator, GraphObject, Id, Node,
+    types, Direction, Edge, EdgeRef, Graph, GraphAlgorithm, GraphAnnotator, GraphObject, Id, Node,
 };
 use rand::distributions::WeightedError;
 use rand::seq::SliceRandom;
@@ -146,30 +146,8 @@ where
                             match edges_same_type.as_slice().choose_weighted(
                                 &mut thread_rng,
                                 |item| match item.edge_type {
-                                    types::EdgeType::Contrib => {
-                                        let selected_edge = network
-                                            .get_edge(item.id)
-                                            .expect("Couldn't access edge during random walk.");
-                                        let source_node = network
-                                            .get_node(selected_edge.source())
-                                            .expect("walks: source node not found.");
-
-                                        let p_x = selected_edge.data().contributions.unwrap();
-                                        let n = source_node.data().total_contributions.unwrap();
-                                        f64::from(p_x) / f64::from(n)
-                                    }
-                                    types::EdgeType::ContribStar => {
-                                        let selected_edge = network
-                                            .get_edge(item.id)
-                                            .expect("Couldn't access edge during random walk.");
-                                        let source_node = network
-                                            .get_node(selected_edge.source())
-                                            .expect("walks: source node not found.");
-
-                                        let p_x = selected_edge.data().contributions.unwrap();
-                                        let n_x = source_node.data().total_contributions.unwrap();
-                                        f64::from(p_x) / f64::from(n_x)
-                                    }
+                                    types::EdgeType::Contrib => weigh_contrib(network, item),
+                                    types::EdgeType::ContribStar => weigh_contrib(network, item),
                                     types::EdgeType::Maintain => 1.0 / edges_same_type.len() as f64,
                                     types::EdgeType::MaintainStar => {
                                         1.0 / edges_same_type.len() as f64
@@ -209,6 +187,34 @@ where
         )),
         Some(w) => w,
     }
+}
+
+fn weigh_contrib<G>(network: &G, item: &EdgeRef<Id<G::Node>, Id<G::Edge>>) -> f64
+where
+    <G as Graph>::Node: Node<types::NodeData<Osrank>>,
+    <G as Graph>::Edge: Edge<
+        <G as Graph>::Weight,
+        <<G as Graph>::Node as GraphObject>::Id,
+        types::EdgeData<<G as Graph>::Weight>,
+    >,
+    G: Graph<NodeData = types::NodeData<Osrank>, EdgeData = types::EdgeData<<G as Graph>::Weight>>,
+{
+    let selected_edge = network
+        .get_edge(item.id)
+        .expect("Couldn't access edge during random walk.");
+    let source_node = network
+        .get_node(selected_edge.source())
+        .expect("walks: source node not found.");
+
+    let p_x = selected_edge
+        .data()
+        .contributions
+        .expect("weigh_contrib: p_x was None.");
+    let n = source_node
+        .data()
+        .total_contributions
+        .expect("weigh_contrib: n was None.");
+    f64::from(p_x) / f64::from(n)
 }
 
 /// Performs a random walk over the input network `G`.
