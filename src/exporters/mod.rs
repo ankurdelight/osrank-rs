@@ -59,19 +59,19 @@ impl std::convert::From<types::NodeType> for RgbColor {
 }
 
 // Traits necessary to satisfy upstream constraints
-impl std::convert::From<types::NodeData<Osrank>> for Rank<f64> {
-    fn from(adata: types::NodeData<Osrank>) -> Self {
+impl std::convert::Into<Rank<f64>> for types::NodeData<Osrank> {
+    fn into(self) -> Rank<f64> {
         Rank {
-            rank: adata.rank.rank.to_f64().unwrap_or(0.0),
+            rank: self.rank.rank.to_f64().unwrap_or(0.0),
             from_type: PhantomData,
         }
     }
 }
 
-impl std::convert::From<Osrank> for Rank<f64> {
-    fn from(r: Osrank) -> Self {
+impl std::convert::Into<Rank<f64>> for Osrank {
+    fn into(self) -> Rank<f64> {
         Rank {
-            rank: r.to_f64().unwrap_or(0.0),
+            rank: self.to_f64().unwrap_or(0.0),
             from_type: PhantomData,
         }
     }

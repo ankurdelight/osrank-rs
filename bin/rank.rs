@@ -123,12 +123,12 @@ fn run_osrank(
             let mut ctx = OsrankNaiveMockContext::default();
             ctx.seed_set = ss;
             ctx.ledger_view = ledger;
-            let network = import_network::<MockNetwork, MockLedger, File>(
+            let network = import_network::<MockNetwork, File>(
                 csv::Reader::from_reader(deps_csv_file),
                 csv::Reader::from_reader(deps_meta_csv_file),
                 csv::Reader::from_reader(contribs_csv_file),
                 None,
-                &ctx.ledger_view,
+                &ctx.ledger_view.get_hyperparams(),
             )?;
 
             (a, ctx, network)
@@ -142,12 +142,12 @@ fn run_osrank(
             let mut ctx = OsrankNaiveMockContext::default();
             ctx.seed_set = ss;
             ctx.ledger_view = ledger;
-            let network = import_network::<MockNetwork, MockLedger, File>(
+            let network = import_network::<MockNetwork, File>(
                 csv::Reader::from_reader(deps_csv_file),
                 csv::Reader::from_reader(deps_meta_csv_file),
                 csv::Reader::from_reader(contribs_csv_file),
                 None,
-                &ctx.ledger_view,
+                &ctx.ledger_view.get_hyperparams(),
             )?;
 
             (a, ctx, network)
