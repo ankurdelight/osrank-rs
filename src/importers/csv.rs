@@ -11,12 +11,11 @@ extern crate sprs;
 use crate::adjacency::new_network_matrix;
 use crate::linalg::{DenseMatrix, SparseMatrix};
 use crate::protocol_traits::graph::GraphExtras;
-use crate::protocol_traits::ledger::LedgerView;
 use crate::types::network::{Artifact, Dependency};
 use crate::types::{Osrank, Weight};
 use core::fmt;
-use num_traits::{Num, One, Zero};
-use oscoin_graph_api::{types, GraphDataReader, GraphDataWriter, GraphObject, GraphWriter};
+use num_traits::{Num, One, Signed, Zero};
+use oscoin_graph_api::{types, Graph, GraphDataReader, GraphDataWriter, GraphObject, GraphWriter};
 use serde::Deserialize;
 use sprs::{CsMat, TriMat, TriMatBase};
 use std::collections::{HashMap, HashSet};
@@ -224,10 +223,9 @@ impl<G> ImportCtx<G>
 where
     G: GraphDataReader<
             Node = Artifact<String, Osrank>,
-            Edge = Dependency<usize, String, f64>,
-            Weight = f64,
+            Edge = Dependency<usize, String, <G as Graph>::Weight>,
             NodeData = types::NodeData<Osrank>,
-            EdgeData = types::EdgeData<f64>,
+            EdgeData = types::EdgeData<<G as Graph>::Weight>,
         > + GraphDataWriter,
 {
     fn new() -> ImportCtx<G> {
@@ -374,42 +372,39 @@ where
 /// Rust ecosystem, simply run
 ///
 /// ```rust, no_run
-/// use osrank::protocol_traits::ledger::MockLedger;
+/// use osrank::protocol_traits::ledger::{MockLedger, LedgerView};
 /// use osrank::importers::csv::import_network;
-/// use osrank::types::network::Network;
+/// use osrank::types::mock::MockNetwork;
 /// use std::fs::File;
-///
-/// type MockNetwork = Network<f64>;
 ///
 /// let mut deps_csv_file = File::open("data/cargo_dependencies.csv").unwrap();
 /// let mut deps_meta_csv_file = File::open("data/cargo_dependencies_meta.csv").unwrap();
 /// let mut contribs_csv_file = File::open("data/cargo_contributions.csv").unwrap();
 /// let mock_ledger = MockLedger::default();
-/// let network = import_network::<MockNetwork, MockLedger, File>( csv::Reader::from_reader(deps_csv_file)
+/// let network = import_network::<MockNetwork<f64>, File>( csv::Reader::from_reader(deps_csv_file)
 ///                             , csv::Reader::from_reader(deps_meta_csv_file)
 ///                             , csv::Reader::from_reader(contribs_csv_file)
 ///                             , None
-///                             , &mock_ledger);
+///                             , &mock_ledger.get_hyperparams());
 /// assert_eq!(network.is_ok(), true);
 /// ```
 ///
-pub fn import_network<G, L, R>(
+pub fn import_network<G, R>(
     deps_csv: csv::Reader<R>,
     deps_meta_csv: csv::Reader<R>,
     mut contribs_csv: csv::Reader<R>,
     //TODO(and) We want to consider maintainers at some point.
     _maintainers_csv_file: Option<csv::Reader<R>>,
-    ledger_view: &L,
+    hyperparams: &types::HyperParameters<<G as Graph>::Weight>,
 ) -> Result<G, CsvImportError>
 where
-    L: LedgerView<W = f64>,
     R: Read,
+    <G as Graph>::Weight: Default + Num + Copy + Clone + From<u32> + PartialOrd + Signed,
     G: GraphExtras<
             Node = Artifact<String, Osrank>,
-            Edge = Dependency<usize, String, f64>,
-            Weight = f64,
+            Edge = Dependency<usize, String, <G as Graph>::Weight>,
             NodeData = types::NodeData<Osrank>,
-            EdgeData = types::EdgeData<f64>,
+            EdgeData = types::EdgeData<<G as Graph>::Weight>,
         > + GraphWriter
         + GraphDataReader,
 {
@@ -503,8 +498,7 @@ where
 
     debug!("Generated dep_adj_matrix...");
 
-    let con_adj_matrix =
-        new_contribution_adjacency_matrix(&ctx.deps_meta, &ctx.contribs_meta, Box::new(f64::from))?;
+    let con_adj_matrix = new_contribution_adjacency_matrix(&ctx.deps_meta, &ctx.contribs_meta)?;
 
     debug!("Generated con_adj_matrix...");
 
@@ -515,7 +509,7 @@ where
         &dep_adj_matrix,
         &con_adj_matrix,
         &maintainers_matrix,
-        ledger_view.get_hyperparams(),
+        hyperparams,
     );
 
     debug!("Generated the full graph adjacency matrix...");
@@ -612,10 +606,9 @@ where
 pub fn new_contribution_adjacency_matrix<N>(
     deps_meta: &DependenciesMetadata,
     contribs_meta: &ContributionsMetadata,
-    mk_contribution: Box<dyn Fn(u32) -> N>,
 ) -> Result<ContributionMatrix<N>, CsvImportError>
 where
-    N: Num + Clone,
+    N: Num + Clone + From<u32>,
 {
     // Creates a sparse matrix of projects x contributors
     let mut contrib_adj: TriMat<N> =
@@ -633,7 +626,7 @@ where
                         .map(|col| (*row_ix, *col))
                 })
         {
-            contrib_adj.add_triplet(row_ix, col_ix, mk_contribution(row.contributions))
+            contrib_adj.add_triplet(row_ix, col_ix, N::from(row.contributions))
         }
     }
 
@@ -645,7 +638,7 @@ mod tests {
     extern crate num_traits;
     extern crate tempfile;
 
-    use crate::protocol_traits::ledger::MockLedger;
+    use crate::protocol_traits::ledger::{LedgerView, MockLedger};
     use crate::types::mock::MockNetwork;
     use num_traits::Zero;
     use oscoin_graph_api::{types, GraphDataReader};
@@ -706,7 +699,7 @@ mod tests {
                 .flexible(true)
                 .from_reader(contrib_file),
             None,
-            &mock_ledger,
+            &mock_ledger.get_hyperparams(),
         )
         .unwrap_or_else(|e| panic!("returned unexpected error: {}", e));
 

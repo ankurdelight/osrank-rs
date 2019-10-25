@@ -228,12 +228,12 @@ pub fn construct_network(meta_num: usize, contributions_num: usize) -> MockNetwo
                 .collect::<Vec<u8>>();
 
             let mock_ledger = MockLedger::default();
-            import_network::<MockNetwork, MockLedger, _>(
+            import_network::<MockNetwork, _>(
                 csv::Reader::from_reader(deps_reader.as_slice()),
                 csv::Reader::from_reader(deps_meta_reader.as_slice()),
                 csv::Reader::from_reader(contribs_reader.as_slice()),
                 None,
-                &mock_ledger,
+                &mock_ledger.get_hyperparams(),
             )
             .unwrap()
         }

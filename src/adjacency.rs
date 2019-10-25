@@ -16,10 +16,10 @@ pub fn new_network_matrix<N>(
     dep_matrix: &SparseMatrix<N>,
     contrib_matrix: &SparseMatrix<N>,
     maintainer_matrix: &SparseMatrix<N>,
-    hyperparams: &types::HyperParameters<f64>,
+    hyperparams: &types::HyperParameters<N>,
 ) -> SparseMatrix<N>
 where
-    N: Num + Copy + Default + From<f64> + PartialOrd + Signed,
+    N: Default + Copy + Clone + Num + PartialOrd + Signed,
 {
     debug!("Generating contrib_t...");
     let contrib_t = transpose_storage_csr(&contrib_matrix);
@@ -34,36 +34,23 @@ where
     debug!("Generating project2project matrix...");
     let project_to_project = scalar_mul_mat(
         &normalise_rows(&dep_matrix),
-        hyperparams
-            .get_param(&types::EdgeType::Depend)
-            .clone()
-            .into(),
+        hyperparams.get_param(&types::EdgeType::Depend).clone(),
     );
 
     debug!("Generating project2account matrix...");
-    let maintain_factor = hyperparams
-        .get_param(&types::EdgeType::Maintain)
-        .clone()
-        .into();
+    let maintain_factor = hyperparams.get_param(&types::EdgeType::Maintain).clone();
     let project_to_account = &scalar_mul_mat(&maintainer_norm, maintain_factor)
         + &scalar_mul_mat(
             &normalise_rows(&contrib_matrix),
-            hyperparams
-                .get_param(&types::EdgeType::Contrib)
-                .clone()
-                .into(),
+            hyperparams.get_param(&types::EdgeType::Contrib).clone(),
         );
 
     debug!("Generating account2project matrix...");
-    let contrib_prime_factor = hyperparams
-        .get_param(&types::EdgeType::ContribStar)
-        .clone()
-        .into();
+    let contrib_prime_factor = hyperparams.get_param(&types::EdgeType::ContribStar).clone();
     let a1 = scalar_mul_mat(&contrib_t_norm, contrib_prime_factor);
     let maintain_prime_factor = hyperparams
         .get_param(&types::EdgeType::MaintainStar)
-        .clone()
-        .into();
+        .clone();
     let account_to_project = &hadamard_mul(
         &scalar_mul_mat(&maintainer_t, maintain_prime_factor),
         &contrib_t_norm,

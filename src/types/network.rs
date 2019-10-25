@@ -22,7 +22,7 @@ use petgraph::Directed;
 
 use crate::types::dynamic_weight::DynamicWeights;
 use crate::types::Weight;
-use crate::util::quickcheck::{frequency, Positive};
+use crate::util::quickcheck::{frequency, Alphanumeric, Positive};
 use quickcheck::{Arbitrary, Gen};
 
 #[derive(Debug, Clone)]
@@ -295,13 +295,12 @@ where
     }
 }
 
-impl<ArtifactId, W> Arbitrary for Artifact<ArtifactId, W>
+impl<W> Arbitrary for Artifact<String, W>
 where
-    ArtifactId: Arbitrary,
     W: Zero + Arbitrary,
 {
     fn arbitrary<G: Gen>(g: &mut G) -> Self {
-        let id: ArtifactId = Arbitrary::arbitrary(g);
+        let id: String = Alphanumeric::arbitrary(g).get_alphanumeric;
         let acc_contribs: Positive<u32> = Arbitrary::arbitrary(g);
         let prj_contribs: Positive<u32> = Arbitrary::arbitrary(g);
         let choices = vec![

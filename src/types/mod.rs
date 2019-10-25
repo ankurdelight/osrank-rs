@@ -10,6 +10,7 @@ use fraction::{Fraction, GenericFraction};
 use num_traits::{Num, One, Signed, Zero};
 use quickcheck::{Arbitrary, Gen};
 use std::fmt;
+use std::iter::Sum;
 use std::ops::{Deref, Div, Mul, Rem};
 
 /// Trait to calculate the edge's weight on the fly.
@@ -20,8 +21,15 @@ pub mod walk;
 
 /// The `Osrank` score, modeled as a fraction. It has a default value of `Zero`,
 /// in case no `Osrank` is provided/calculated yet.
-#[derive(Copy, Clone, Debug, Display, Add, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Display, Add, PartialEq, PartialOrd)]
 pub struct Osrank(pub Fraction);
+
+impl fmt::Debug for Osrank {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let Osrank(frac) = self;
+        write!(f, "{}/{}", frac.numer().unwrap(), frac.denom().unwrap())
+    }
+}
 
 impl Deref for Osrank {
     type Target = Fraction;
@@ -41,6 +49,28 @@ impl Zero for Osrank {
 
     fn is_zero(&self) -> bool {
         self.deref().is_zero()
+    }
+}
+
+impl One for Osrank {
+    fn one() -> Self {
+        Osrank(One::one())
+    }
+}
+
+impl Mul for Osrank {
+    type Output = Osrank;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        let Osrank(r1) = self;
+        let Osrank(r2) = rhs;
+        Osrank(r1 * r2)
+    }
+}
+
+impl Sum for Osrank {
+    fn sum<I: Iterator<Item = Osrank>>(iter: I) -> Osrank {
+        Osrank(iter.fold(GenericFraction::zero(), |acc, Osrank(x)| acc + x))
     }
 }
 
@@ -124,6 +154,14 @@ impl Mul for Weight {
     fn mul(self, rhs: Self) -> Self::Output {
         Weight {
             get_weight: self.get_weight * rhs.get_weight,
+        }
+    }
+}
+
+impl From<u32> for Weight {
+    fn from(t: u32) -> Self {
+        Weight {
+            get_weight: GenericFraction::new(t, 1u32),
         }
     }
 }

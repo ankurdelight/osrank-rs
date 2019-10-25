@@ -1,15 +1,19 @@
 #![allow(unknown_lints)]
 #![warn(clippy::all)]
 
+extern crate csv as csv_lib;
 extern crate oscoin_graph_api;
 
 use crate::exporters::csv::{export_rank_to_csv, CsvExporterError};
 use crate::exporters::Exporter;
-use crate::types::network::{Artifact, Network};
+use crate::importers::csv;
+use crate::protocol_traits::ledger::{LedgerView, MockLedger};
+use crate::types::network::Network;
 use crate::types::Osrank;
-use crate::util::quickcheck::{frequency, Positive};
+use crate::util::quickcheck::{Alphanumeric, NonEmpty};
 use fraction::ToPrimitive;
-use oscoin_graph_api::{types, Graph, GraphAnnotator, GraphObject, GraphWriter};
+use num_traits::{Num, Signed};
+use oscoin_graph_api::{Graph, GraphAnnotator, GraphObject};
 use quickcheck::{Arbitrary, Gen};
 use rand::Rng;
 use std::collections::HashMap;
@@ -26,132 +30,130 @@ pub struct Mock<A> {
     pub unmock: A,
 }
 
-#[derive(Debug)]
-struct ArbitraryEdge<'a, W> {
-    source: &'a String,
-    target: &'a String,
-    id: usize,
-    data: types::EdgeData<W>,
-}
-
-impl<W: Arbitrary + From<f64>> Arbitrary for MockNetwork<W> {
-    // Tries to generate an arbitrary Network.
+impl<W> Arbitrary for MockNetwork<W>
+where
+    MockLedger<W>: Default,
+    W: Default + Arbitrary + Num + Copy + Clone + From<u32> + PartialOrd + Signed,
+{
     fn arbitrary<G: Gen>(g: &mut G) -> Self {
-        let mut graph = Network::default();
-        let nodes: Vec<Artifact<String, Osrank>> = Arbitrary::arbitrary(g);
+        let mock_ledger = MockLedger::default();
+        let mut deps: String = String::from("FROM_ID,TO_ID\n");
+        let mut deps_meta: String = String::from("ID,NAME,PLATFORM\n");
+        let mut contrib: String = String::from("ID,MAINTAINER,REPO,CONTRIBUTIONS,NAME\n");
 
-        let edges = arbitrary_edges_from(g, &nodes);
+        // Max 5 projects.
+        let prjs: NonEmpty<Alphanumeric> = Arbitrary::arbitrary(g);
+        let random_projects: Vec<&Alphanumeric> =
+            prjs.get_nonempty.iter().by_ref().take(5).collect();
 
-        for n in &nodes {
-            graph.add_node(n.id().clone(), n.data().clone())
+        let random_dependencies: Vec<(usize, usize)> = arbitrary_dependencies(g, &random_projects);
+
+        let random_contributors_names: NonEmpty<Alphanumeric> = Arbitrary::arbitrary(g);
+        // Max 5 contributors
+        let random_contributors: Vec<String> = random_contributors_names
+            .get_nonempty
+            .iter()
+            .cloned()
+            .take(5)
+            .map(|c: Alphanumeric| {
+                let mut s = c.get_alphanumeric;
+                s.insert_str(0, "github@");
+                s
+            })
+            .collect();
+
+        let random_contributions: Vec<(usize, String, u32)> =
+            arbitrary_contributions(g, &random_projects, random_contributors);
+
+        for (dep_from, dep_to) in random_dependencies {
+            deps.push_str(format!("{},{}\n", dep_from, dep_to).as_str());
         }
 
-        for e in edges {
-            graph.add_edge(e.id, e.source, e.target, e.data)
+        for (prj_id, prj_name) in random_projects.iter().cloned().enumerate() {
+            deps_meta.push_str(format!("{},{},Foo\n", prj_id, prj_name.get_alphanumeric).as_str());
         }
 
-        graph
+        for (prj_id, contrib_name, contributions) in random_contributions.iter() {
+            contrib.push_str(
+                format!(
+                    "{},{},http://github.com/foo,{},{}\n",
+                    prj_id, contrib_name, contributions, random_projects[*prj_id].get_alphanumeric
+                )
+                .as_str(),
+            );
+        }
+
+        csv::import_network(
+            csv_lib::ReaderBuilder::new()
+                .flexible(true)
+                .from_reader(deps.as_bytes()),
+            csv_lib::ReaderBuilder::new()
+                .flexible(true)
+                .from_reader(deps_meta.as_bytes()),
+            csv_lib::ReaderBuilder::new()
+                .flexible(true)
+                .from_reader(contrib.as_bytes()),
+            None,
+            &mock_ledger.get_hyperparams(),
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "returned unexpected error when generating arbitrary MockNetwork: {}",
+                e
+            )
+        })
     }
 }
 
-#[derive(Clone)]
-enum NewEdgeAction {
-    SkipNode,
-    UseNode,
-}
+fn arbitrary_dependencies<G: Gen>(g: &mut G, xs: &[&Alphanumeric]) -> Vec<(usize, usize)> {
+    let mut add_more_deps;
+    let mut current_deps;
+    let mut res = Vec::new();
 
-impl Arbitrary for NewEdgeAction {
-    // Tries to generate an arbitrary Network.
-    fn arbitrary<G: Gen>(g: &mut G) -> Self {
-        let choices = vec![(80, NewEdgeAction::UseNode), (20, NewEdgeAction::SkipNode)];
-        frequency(g, choices)
-    }
-}
+    for (project_id, _) in xs.iter().enumerate() {
+        add_more_deps = Arbitrary::arbitrary(g);
+        current_deps = 0;
 
-fn arbitrary_edge<'a, G: Gen + Rng, W>(
-    g: &mut G,
-    id: usize,
-    source: &'a String,
-    target: &'a String,
-    w: f64,
-) -> ArbitraryEdge<'a, W>
-where
-    W: From<f64>,
-{
-    let type_choices = vec![
-        (20, types::EdgeType::Contrib),
-        (20, types::EdgeType::ContribStar),
-        (20, types::EdgeType::Maintain),
-        (20, types::EdgeType::MaintainStar),
-        (20, types::EdgeType::Depend),
-    ];
-    let edge_type = frequency(g, type_choices);
-    let contributions = arbitrary_contributions(g, &edge_type);
+        // Limit the number of dependencies to 3 per project.
+        while add_more_deps && current_deps <= 3 {
+            let target_id = g.gen_range(0, xs.len());
 
-    ArbitraryEdge {
-        id,
-        source,
-        target,
-        data: types::EdgeData {
-            edge_type,
-            weight: W::from(w),
-            contributions,
-        },
-    }
-}
-
-fn arbitrary_contributions<G: Gen + Rng>(g: &mut G, edge_type: &types::EdgeType) -> Option<u32> {
-    let contribs: Positive<u32> = Arbitrary::arbitrary(g);
-    match edge_type {
-        types::EdgeType::Depend => None,
-        _ => Some(contribs.get_positive),
-    }
-}
-
-/// Attempts to generate a vector of random edges that respect the osrank
-/// invariant, i.e. that the sum of the weight of the outgoing ones from a
-/// certain node is 1.
-fn arbitrary_edges_from<'a, G: Gen + Rng, W>(
-    g: &mut G,
-    nodes: &'a [Artifact<String, Osrank>],
-) -> Vec<ArbitraryEdge<'a, W>>
-where
-    W: From<f64>,
-{
-    let mut edges = Vec::new();
-    let mut id_counter = 0;
-
-    for node in nodes {
-        let action: NewEdgeAction = Arbitrary::arbitrary(g);
-        match action {
-            NewEdgeAction::SkipNode => continue,
-            NewEdgeAction::UseNode => {
-                // Pick a set of random nodes (it can include this node as
-                // well) and generate a bunch of edges between them.
-
-                let edges_num = g.gen_range(1, 6); // Up to 5 outgoing edges
-                let node_ixs = (0..edges_num)
-                    .map(|_| g.gen_range(0, nodes.len()))
-                    .collect::<Vec<usize>>();
-
-                for ix in node_ixs {
-                    let w = 1.0 / f64::from(edges_num);
-
-                    edges.push(arbitrary_edge(
-                        g,
-                        id_counter,
-                        &node.id(),
-                        &nodes[ix].id(),
-                        w,
-                    ));
-
-                    id_counter += 1;
-                }
+            // avoid self-loops
+            if target_id != project_id {
+                res.push((project_id, target_id));
             }
+
+            current_deps += 1;
         }
     }
 
-    edges
+    res
+}
+
+fn arbitrary_contributions<G: Gen>(
+    g: &mut G,
+    all_projects: &[&Alphanumeric],
+    all_users: Vec<String>,
+) -> Vec<(usize, String, u32)> {
+    let mut add_more_contribs;
+    let mut current_contribs;
+    let mut res = Vec::new();
+
+    for user_id in all_users.iter() {
+        add_more_contribs = Arbitrary::arbitrary(g);
+        current_contribs = 0;
+
+        // Limit the number of contributions to 3 per user.
+        while add_more_contribs && current_contribs <= 3 {
+            let target_project_id = g.gen_range(0, all_projects.len());
+            let user_contrib = g.gen_range(1, 100);
+
+            res.push((target_project_id, user_id.clone(), user_contrib));
+            current_contribs += 1;
+        }
+    }
+
+    res
 }
 
 /// A mock `GraphAnnotator` that stores the state into a dictionary

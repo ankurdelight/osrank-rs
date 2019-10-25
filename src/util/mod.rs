@@ -1,7 +1,29 @@
+extern crate quickcheck as qc;
 pub mod quickcheck;
 
 use num_traits::Zero;
 use oscoin_graph_api::{types, Edge, Graph, GraphWriter, Id, Node};
+use qc::{Arbitrary, Gen};
+use std::fmt;
+
+#[derive(Clone)]
+pub struct Pretty<A> {
+    pub unpretty: A,
+}
+
+impl<A: fmt::Debug> fmt::Debug for Pretty<A> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:#?}", self.unpretty)
+    }
+}
+
+impl<A: Arbitrary> Arbitrary for Pretty<A> {
+    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        Pretty {
+            unpretty: Arbitrary::arbitrary(g),
+        }
+    }
+}
 
 // General helper functions to build graphs slightly easily.
 
